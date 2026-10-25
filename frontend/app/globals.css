@@ -50,6 +50,8 @@ body { margin: 0; color: var(--fg); background: var(--bg); font-family: var(--fo
 .react-flow__controls-button { background: #171920 !important; border-bottom-color: #30333d !important; fill: #c8c8d1 !important; }
 .react-flow__edge-text { fill: #aeb0bc !important; font-family: var(--font-code); font-size: 9px; }
 .react-flow__edge-textbg { fill: #111318 !important; }
+.react-flow__attribution { background: transparent !important; }
+.react-flow__attribution a { color: #5f6370 !important; font-size: 9px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
