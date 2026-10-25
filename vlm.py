@@ -13,6 +13,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:  # Verify TLS against the OS certificate store, so API calls work behind corporate TLS-inspecting proxies.
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 DEFAULTS = {
     "openai": "gpt-4.1-mini",
     "groq": "meta-llama/llama-4-scout-17b-16e-instruct",

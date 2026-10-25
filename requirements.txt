@@ -9,6 +9,7 @@ numpy>=1.26
 # Generator VLM providers (API)
 openai>=1.40
 google-genai>=1.0
+truststore>=0.9  # OS certificate store (corporate proxies)
 # Visual verifiers + local VLM (install a CUDA/MPS torch build first where available)
 torch>=2.2
 transformers>=4.45,<5
