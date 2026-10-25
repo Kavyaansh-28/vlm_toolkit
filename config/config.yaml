@@ -34,5 +34,8 @@ verification:
   # Set true for reproducible/offline runs after model weights are cached.
   local_files_only: false
   cache_dir: results/cache
+  # Grounding DINO input size (shortest, longest edge) on CPU-only machines: ~3x faster than
+  # the default 800x1333 with near-identical scores. GPU runs (Kaggle) always use the default.
+  cpu_image_size: [480, 800]
 claims:
   use_llm: false

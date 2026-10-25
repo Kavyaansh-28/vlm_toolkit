@@ -50,8 +50,10 @@ def _build_verifiers() -> tuple[ObjectVerifier, AttributeVerifier, float]:
     cache_dir = Path(options.get("cache_dir", "results/cache"))
     cache_dir = cache_dir if cache_dir.is_absolute() else ROOT / cache_dir
     cache = VerificationCache(cache_dir / f"{_STATE['cache_name']}.jsonl", _STATE["cache_only"])
+    cpu_size = options.get("cpu_image_size")
     grounder = CachedGrounder(GroundingDINO(str(options.get("grounding_model", "IDEA-Research/grounding-dino-tiny")),
-                                            float(options.get("detect_floor", .10)), local_only, device), cache)
+                                            float(options.get("detect_floor", .10)), local_only, device,
+                                            tuple(cpu_size) if cpu_size else None), cache)
     probe = CLIPRegionProbe(str(options.get("attribute_model", "openai/clip-vit-base-patch32")), local_only, device)
     return (ObjectVerifier(grounder, threshold),
             AttributeVerifier(probe, float(options.get("attribute_threshold", .50)), cache), threshold)

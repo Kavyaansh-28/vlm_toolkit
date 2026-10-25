@@ -50,12 +50,13 @@ class GroundingDINO:
     ``threshold`` is the detection floor: boxes at or above it are returned so
     s_obj stays a real score below the support threshold.  ``local_files_only``
     makes reproducible/offline evaluation fail explicitly instead of contacting
-    a registry unexpectedly.
+    a registry unexpectedly.  ``cpu_image_size`` (shortest, longest edge) shrinks the
+    model input when running on CPU, where full resolution costs ~17 s per object.
     """
     def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny", threshold: float = .10,
-                 local_files_only: bool = False, device: str = "auto"):
+                 local_files_only: bool = False, device: str = "auto", cpu_image_size: tuple[int, int] | None = None):
         self.model_id, self.threshold, self.local_files_only = model_id, threshold, local_files_only
-        self.device = device
+        self.device, self.cpu_image_size = device, cpu_image_size
         self._processor = self._model = None
         self._load_error: str | None = None
         self._lock = threading.Lock()  # API requests run in a thread pool; load the model once
@@ -78,11 +79,21 @@ class GroundingDINO:
             processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
             model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id, local_files_only=self.local_files_only)
             model.to(self.device).eval()
+            if self.cache_tag():
+                shortest, longest = self.cpu_image_size
+                processor.image_processor.size = {"shortest_edge": shortest, "longest_edge": longest}
             self._processor, self._model = processor, model  # publish only when fully ready
             return True
         except Exception as exc:  # dependency/model access boundary
             self._load_error = f"Grounding DINO unavailable: {type(exc).__name__}: {str(exc)[:180]}"
             return False
+
+    def cache_tag(self) -> str:
+        """Non-empty when inputs are resized, so those scores never share cache entries with full-resolution ones."""
+        from utils import get_device
+        if self.cpu_image_size and get_device(self.device) == "cpu":
+            return "{}x{}".format(*self.cpu_image_size)
+        return ""
 
     def detect(self, image_path: str, object_name: str) -> GroundingResult:
         if not self._load():
@@ -112,6 +123,8 @@ class CachedGrounder:
 
     def detect(self, image_path: str, object_name: str) -> GroundingResult:
         key = f"{image_sha256(image_path)}|{object_name.strip().lower()}"
+        tag = getattr(self.grounder, "cache_tag", lambda: "")()
+        key = f"{key}|{tag}" if tag else key
         row = self.cache.get(key)
         if row is not None:
             add_cost(row.get("ms", 0.0))

@@ -4,7 +4,7 @@
  * Instead of relying on the rewrite proxy (which has a short default timeout
  * that causes ECONNRESET / "socket hang up" on long-running VLM inference),
  * this route handler forwards the request to the Python backend with an
- * explicit 5-minute timeout.  Route handlers take precedence over rewrites,
+ * explicit 10-minute timeout.  Route handlers take precedence over rewrites,
  * so this replaces the rewrite for this one heavy endpoint while all lighter
  * endpoints (config, history, evaluation) keep using the fast rewrite proxy.
  */
@@ -20,8 +20,8 @@ export async function POST(request: Request) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body,
-      // 5 minutes — enough for 3 candidates × (generation + verification)
-      signal: AbortSignal.timeout(300_000),
+      // 10 minutes: first-run model loading plus CPU-only verification of 3 candidates
+      signal: AbortSignal.timeout(600_000),
     });
 
     const data = await upstream.text();
@@ -38,7 +38,7 @@ export async function POST(request: Request) {
     const isTimeout =
       err instanceof DOMException && err.name === "TimeoutError";
     return Response.json(
-      { error: isTimeout ? "Analysis timed out (5 min). Try fewer candidates or a faster provider." : message },
+      { error: isTimeout ? "Analysis timed out (10 min). Try fewer candidates or a faster provider." : message },
       { status: isTimeout ? 504 : 502 },
     );
   }

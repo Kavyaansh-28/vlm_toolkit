@@ -15,7 +15,7 @@ const nextConfig: NextConfig = {
   },
   // Lightweight endpoints are still proxied through rewrites.  The heavy
   // /api/analyze endpoint is handled by a route handler in
-  // app/api/analyze/route.ts with an explicit 5-minute timeout instead.
+  // app/api/analyze/route.ts with an explicit 10-minute timeout instead.
   async rewrites() {
     return [
       { source: "/api/config", destination: `${api}/api/config` },
