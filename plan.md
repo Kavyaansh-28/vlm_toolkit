@@ -70,7 +70,7 @@ All code tasks in this plan (S0, P1–P5, H1–H6, Y1–Y5, K1–K4) are impleme
 
 **Accounts (H+0):**
 1. **Prithvi and Kavyansh:** create Kaggle accounts and **phone-verify** them (Settings → Phone verification). Without it there's no GPU and no Internet. Two accounts give two independent quotas, so the second is the backup if one is queued or runs out.
-2. **Prithvi:** create a **free HF organization** `vlm-reliability-pccoe` and invite Harsh, Yash and Kavyansh. Then create the private dataset repo: `hf repo create vlm-reliability-pccoe/vlm-results --repo-type dataset --private`
+2. **Prithvi:** results live in the dataset repo `Prithxvhie44/vlm-results` on Prithvi's personal Hugging Face account (no organisation needed). If it is private, teammates download with a read token from Prithvi; if public, no token is needed to read.
 3. **Prithvi:** create an HF **write** token scoped to the org. Teammates create **read** tokens for downloading results. Never commit tokens.
 4. If the GitHub repo is private, create a fine-grained, read-only GitHub token (`GH_TOKEN`).
 5. In the Kaggle notebook: **Add-ons → Secrets** → add `HF_TOKEN` (and `GH_TOKEN`). In **Settings**, set Accelerator = **GPU T4 x2**, Internet = **On**, Persistence = Files.
@@ -238,7 +238,7 @@ python -m pytest -q
 - Delete the unused root `package.json` / `package-lock.json`.
 - `.gitignore`: add `data/`, `results/gen/`, `results/proc/`, `results/cache/`, `results/tuned.yaml`, `.env`. Keep `data/coco_synonyms.txt` with a `!data/coco_synonyms.txt` exception.
 - Like every change, S0 goes in through a PR. Ask Harsh for a fast review so the others can branch off it.
-- `.env.example`: add `HF_TOKEN=`, `HF_ROUTER_MODEL=`, `RESULTS_REPO=vlm-reliability-pccoe/vlm-results`.
+- `.env.example`: add `HF_TOKEN=`, `HF_ROUTER_MODEL=`, `RESULTS_REPO=Prithxvhie44/vlm-results`.
 
 ---
 
@@ -381,7 +381,7 @@ from kaggle_secrets import UserSecretsClient
 sec = UserSecretsClient()
 os.environ["HF_TOKEN"] = sec.get_secret("HF_TOKEN")
 os.environ["GH_TOKEN"] = sec.get_secret("GH_TOKEN")          # skip if the repo is public
-os.environ["RESULTS_REPO"] = "vlm-reliability-pccoe/vlm-results"
+os.environ["RESULTS_REPO"] = "Prithxvhie44/vlm-results"
 !git clone --depth 1 https://$GH_TOKEN@github.com/<owner>/vlm_toolkit.git /kaggle/working/vlm
 %cd /kaggle/working/vlm
 !nvidia-smi --query-gpu=name,memory.total --format=csv        # expect 2 x Tesla T4
@@ -578,7 +578,7 @@ python -m evaluation.prepare_data --out data/benchmarks --images data/images --p
 - **Latency ratio** = mean(`total`) / mean(`generation_base`) per ablation, using values measured on the Kaggle T4 only. Report it honestly against the paper's < 2× target.
 - **Calibration:** on POPE full_toolkit rows where the base answer was yes, R = λ₁v + λ₂p against "final answer correct". Report ECE and Brier using the existing `classification_metrics`.
 ```text
-hf download vlm-reliability-pccoe/vlm-results --repo-type dataset --local-dir . --include "results/*"
+hf download Prithxvhie44/vlm-results --repo-type dataset --local-dir . --include "results/*"
 python -m evaluation.run_benchmarks --proc results/proc --out results/benchmark_report.json --markdown results/RESULTS.md
 ```
 - `RESULTS.md` tables:

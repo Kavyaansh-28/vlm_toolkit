@@ -12,7 +12,7 @@ from kaggle_secrets import UserSecretsClient
 BENCHES = ["pope", "chair"]            # ["smoke"] for the checkpoint run
 REPO_URL = "github.com/Kavyaansh-28/vlm_toolkit.git"
 BRANCH = "main"
-RESULTS_REPO = "vlm-reliability-pccoe/vlm-results"
+RESULTS_REPO = "Prithxvhie44/vlm-results"
 
 secrets = UserSecretsClient()
 os.environ["HF_TOKEN"] = secrets.get_secret("HF_TOKEN")

@@ -80,7 +80,7 @@ If `pnpm install` fails with a 401 from a private registry, install from the pub
 3. Set `BENCHES = ["pope", "chair"]`, then **Save Version → Save & Run All (Commit)**. POPE runs on GPU 0 and CHAIR on GPU 1, taking about 4 h. Results are pushed to the HF dataset repo every 50–300 samples, and re-running resumes.
 4. Download the results and build the report on any laptop:
 ```bash
-hf download vlm-reliability-pccoe/vlm-results --repo-type dataset --local-dir . --include "results/*"
+hf download Prithxvhie44/vlm-results --repo-type dataset --local-dir . --include "results/*"
 python -m evaluation.run_benchmarks --proc results/proc --out results/benchmark_report.json --markdown results/RESULTS.md
 ```
 5. To change thresholds or ablations afterwards without a GPU, use the cached verifier outputs:
