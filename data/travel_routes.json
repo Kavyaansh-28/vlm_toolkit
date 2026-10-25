@@ -1,0 +1,5 @@
+[
+ {"id":"route_j_u","title":"Jaipur to Udaipur","destination":"Jaipur","category":"route","text":"Jaipur and Udaipur are a common multi-city pairing. For planning, treat this as a substantial intercity transfer and reserve most of a day unless a verified flight or rail schedule supports another plan.","source_url":"","source_type":"planning estimate"},
+ {"id":"route_u_jd","title":"Udaipur to Jodhpur","destination":"Udaipur","category":"route","text":"Udaipur to Jodhpur is a substantial road or rail transfer. Keep arrival evening light and verify current transport schedules before booking.","source_url":"","source_type":"planning estimate"},
+ {"id":"route_jd_js","title":"Jodhpur to Jaisalmer","destination":"Jodhpur","category":"route","text":"Jodhpur to Jaisalmer is a long intercity transfer. Avoid scheduling a desert safari immediately after arrival without adequate buffer.","source_url":"","source_type":"planning estimate"}
+]
