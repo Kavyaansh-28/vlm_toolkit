@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import math
 import mimetypes
 import os
@@ -51,10 +52,26 @@ class VLMProvider(ABC):
         """Return text, configured model/provider, and an optional error."""
 
 
+API_IMAGE_MAX_SIDE = 1024  # larger uploads only add transfer time and image tokens
+
+
 def _image_payload(image_path: str) -> tuple[str | None, bytes]:
+    """Image bytes for an API request, re-encoded as JPEG when larger than API_IMAGE_MAX_SIDE.
+
+    Verification always uses the original file; only the generator sees the smaller copy.
+    """
     path = Path(image_path)
     mime = mimetypes.guess_type(path.name)[0]
-    return (mime if mime in {"image/jpeg", "image/png", "image/webp", "image/gif"} else None), path.read_bytes()
+    if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+        return None, b""
+    from PIL import Image
+    with Image.open(path) as image:
+        if max(image.size) <= API_IMAGE_MAX_SIDE:
+            return mime, path.read_bytes()
+        image.thumbnail((API_IMAGE_MAX_SIDE, API_IMAGE_MAX_SIDE))
+        buffer = io.BytesIO()
+        image.convert("RGB").save(buffer, format="JPEG", quality=90)
+    return "image/jpeg", buffer.getvalue()
 
 
 class OpenAICompatibleProvider(VLMProvider):
@@ -97,32 +114,56 @@ class OpenAICompatibleProvider(VLMProvider):
                     "error": f"{self.name.title()} vision request failed: {str(exc)[:240]}"}
 
 
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+GEMINI_TIMEOUT_MS = 90_000
+# Transient capacity errors: worth one retry on the fallback model (which has its own quota).
+_GEMINI_RETRYABLE = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "timed out")
+
+
 class GeminiProvider(VLMProvider):
     def __init__(self, model: str, api_key: str):
         self.name, self.model, self.api_key = "gemini", model, api_key
 
+    def _call(self, model: str, prompt: str, mime: str, data: bytes, temperature: float | None) -> str:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key, http_options={"timeout": GEMINI_TIMEOUT_MS})
+        options: dict[str, Any] = {} if temperature is None else {"temperature": temperature}
+        # Thinking dominates caption latency; keep it low (Gemini 3) or off (2.5 Flash).
+        level = os.getenv("GEMINI_THINKING_LEVEL", "low").strip().upper()
+        if model.startswith("gemini-3") and level in types.ThinkingLevel.__members__:
+            options["thinking_config"] = types.ThinkingConfig(thinking_level=types.ThinkingLevel[level])
+        elif model.startswith("gemini-2.5-flash"):
+            options["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        response = client.models.generate_content(
+            model=model, contents=[prompt, types.Part.from_bytes(data=data, mime_type=mime)],
+            config=types.GenerateContentConfig(**options) if options else None,
+        )
+        return response.text or ""
+
     def generate(self, image_path: str, prompt: str, temperature: float | None = None) -> dict[str, Any]:
         try:
-            from google import genai
-            from google.genai import types
-
-            mime, data = _image_payload(image_path)
-            if not mime:
-                return {"response": "", "model": self.model, "provider": self.name,
-                        "error": "Unsupported image type. Upload PNG, JPG, WEBP, or GIF."}
-            client = genai.Client(api_key=self.api_key, http_options={"timeout": 600000})
-            config = types.GenerateContentConfig(temperature=temperature) if temperature is not None else None
-            response = client.models.generate_content(
-                model=self.model, contents=[prompt, types.Part.from_bytes(data=data, mime_type=mime)], config=config,
-            )
-            return {"response": response.text or "", "model": self.model, "provider": self.name,
-                    "probability": None, "probability_available": False}
+            import google.genai  # noqa: F401
         except ImportError:
             return {"response": "", "model": self.model, "provider": self.name,
                     "error": "The google-genai package is not installed. Run: python -m pip install google-genai"}
-        except Exception as exc:
+        mime, data = _image_payload(image_path)
+        if not mime:
             return {"response": "", "model": self.model, "provider": self.name,
-                    "error": f"Gemini vision request failed: {str(exc)[:240]}"}
+                    "error": "Unsupported image type. Upload PNG, JPG, WEBP, or GIF."}
+        fallback = os.getenv("GEMINI_FALLBACK_MODEL", GEMINI_FALLBACK_MODEL).strip()
+        models = [self.model] + ([fallback] if fallback and fallback != self.model else [])
+        error = ""
+        for model in models:
+            try:
+                return {"response": self._call(model, prompt, mime, data, temperature), "model": model,
+                        "provider": self.name, "probability": None, "probability_available": False}
+            except Exception as exc:
+                error = f"Gemini vision request failed ({model}): {str(exc)[:240]}"
+                if not any(marker in str(exc) for marker in _GEMINI_RETRYABLE):
+                    break
+        return {"response": "", "model": self.model, "provider": self.name, "error": error}
 
 
 def providers() -> list[str]:

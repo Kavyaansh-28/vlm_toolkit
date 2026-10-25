@@ -6,6 +6,7 @@ lists, so their candidates are repeated calls and are labelled as such.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -32,11 +33,12 @@ class ProviderVLMEngine:
 
     def generate_candidates(self, image_path: str, query: str, n: int, **kwargs) -> list[dict]:
         # Candidate 1 uses temperature 0 (closest to greedy); the rest are sampled.
-        results = []
-        for index in range(n):
-            item = self.generate(image_path, query, temperature=0.0 if index == 0 else kwargs.get("temperature", self.temperature))
+        # The calls are independent, so they run concurrently; results keep candidate order.
+        temperatures = [0.0] + [kwargs.get("temperature", self.temperature)] * (n - 1)
+        with ThreadPoolExecutor(max_workers=max(1, n)) as pool:
+            results = list(pool.map(lambda t: self.generate(image_path, query, temperature=t), temperatures[:n]))
+        for item in results:
             item["generation_strategy"] = "repeated_api_calls"
-            results.append(item)
         return results
 
 
