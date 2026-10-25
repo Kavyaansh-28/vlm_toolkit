@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.streamlit/
+node_modules/
+.next/
+out/
+frontend/.next/
+frontend/node_modules/
+*.tsbuildinfo
