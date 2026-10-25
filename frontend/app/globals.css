@@ -30,7 +30,8 @@
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 90px; }
 body { margin: 0; color: var(--fg); background: var(--bg); font-family: var(--font-ui); }
-button, input, textarea, select { font: inherit; }
+/* In the base layer so Tailwind text-* utilities on form controls take precedence. */
+@layer base { button, input, textarea, select { font: inherit; } }
 ::selection { background: #655398; color: white; }
 :focus-visible { outline: 2px solid #b19aff; outline-offset: 3px; }
 
