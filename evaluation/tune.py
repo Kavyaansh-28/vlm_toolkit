@@ -4,8 +4,12 @@
 
 * object (lo, hi): grid search maximising F1 of the final yes/no answers
   (tie-break: lower abstention), recomputed from stored v without re-verifying;
-* lambda_verification / lambda_probability: minimise ECE of R against
-  "final answer correct" (n = 1, so lambda_agreement keeps its default).
+* reliability weights are NOT changed by default.  POPE answers are a single
+  "yes"/"no" token from one candidate, so token confidence p_j is trivially well
+  calibrated there and an unconstrained ECE search drives lambda_verification to 0,
+  which would make R ignore visual evidence on captions (CHAIR).  The search is still
+  run and recorded under ``tuning.weights`` for transparency.  ``--tune-weights``
+  applies it, searching only lambda_verification >= ``--min-visual-weight``.
 """
 from __future__ import annotations
 
@@ -55,12 +59,13 @@ def tune_thresholds(rows: list[dict], grounding_threshold: float, target_precisi
     return {"tau_lo": lo, "tau_hi": hi, "f1": f1, "abstention_rate": abstain, "accept_precision_target": target_precision}
 
 
-def tune_weights(rows: list[dict], lo: float, grounding_threshold: float) -> dict:
+def tune_weights(rows: list[dict], lo: float, grounding_threshold: float, min_visual: float = 0.0) -> dict:
+    """ECE-minimising lambda_verification (share of lambda_verification + lambda_probability) on a 0.1 grid >= min_visual."""
     asserted = [r for r in rows if r["pope"]["base_answer"] and r["pope"].get("v") is not None and r["pope"].get("p") is not None]
     if len(asserted) < 30:
         return {}
     best = None
-    for step in range(11):
+    for step in range(round(min_visual * 10), 11):
         l1 = step / 10
         probs, correct = [], []
         for r in asserted:
@@ -77,14 +82,20 @@ def tune_weights(rows: list[dict], lo: float, grounding_threshold: float) -> dic
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--proc", required=True); parser.add_argument("--write", default="results/tuned.yaml")
+    parser.add_argument("--tune-weights", action="store_true", help="also apply tuned reliability weights (default: keep config weights)")
+    parser.add_argument("--min-visual-weight", type=float, default=.5, help="lowest lambda_verification share searched with --tune-weights")
     args = parser.parse_args(argv)
     rows = read_jsonl(args.proc)
     cfg = load_config(tuned="__none__")
     thresholds = tune_thresholds(rows, cfg.grounding_threshold)
-    weights = tune_weights(rows, thresholds["tau_lo"], cfg.grounding_threshold)
+    unconstrained = tune_weights(rows, thresholds["tau_lo"], cfg.grounding_threshold)
+    weights = tune_weights(rows, thresholds["tau_lo"], cfg.grounding_threshold, args.min_visual_weight) if args.tune_weights else {}
     pair = {"tau_lo": thresholds["tau_lo"], "tau_hi": thresholds["tau_hi"]}
+    weight_record = {"applied": bool(weights), "unconstrained_search": unconstrained}
+    if weights:
+        weight_record.update(min_visual_weight=args.min_visual_weight, selected=weights)
     tuned = {"decision": {"per_type": {"object": pair, "quantity": pair, "relation": pair}},
-             "tuning": {"source": args.proc, "n": len(rows), "object_thresholds": thresholds, "weights": weights}}
+             "tuning": {"source": args.proc, "n": len(rows), "object_thresholds": thresholds, "weights": weight_record}}
     if weights:
         lambda_agreement = cfg.weights["agreement"]
         scale = 1 - lambda_agreement  # keep lambda_agreement's default share; split the rest as tuned

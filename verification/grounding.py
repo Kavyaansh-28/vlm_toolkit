@@ -122,10 +122,12 @@ class CachedGrounder:
         self.grounder, self.cache = grounder, cache
 
     def detect(self, image_path: str, object_name: str) -> GroundingResult:
-        key = f"{image_sha256(image_path)}|{object_name.strip().lower()}"
+        base = f"{image_sha256(image_path)}|{object_name.strip().lower()}"
         tag = getattr(self.grounder, "cache_tag", lambda: "")()
-        key = f"{key}|{tag}" if tag else key
-        row = self.cache.get(key)
+        # A resized (CPU) run may reuse full-resolution results, e.g. GPU caches from Kaggle reprocessed
+        # with --cache-only on a laptop; a full-resolution run never reads resized ones.
+        key, fallbacks = (f"{base}|{tag}", (base,)) if tag else (base, ())
+        row = self.cache.get(key, *fallbacks)
         if row is not None:
             add_cost(row.get("ms", 0.0))
             return GroundingResult(object_name, row["boxes"], row["scores"], backend=row.get("backend", "grounding-dino") + ":cached")

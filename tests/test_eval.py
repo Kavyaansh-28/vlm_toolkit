@@ -5,7 +5,7 @@ from core.config import load_config
 from evaluation.evaluator import evaluate, pope
 from evaluation.process import parse_yes_no, process_file
 from evaluation.reports import markdown, write_report
-from evaluation.tune import tune_thresholds
+from evaluation.tune import main as tune_main, tune_thresholds
 from evaluation.fake import fake_verify
 
 
@@ -67,3 +67,33 @@ def test_tuning_finds_separating_threshold():
         rows.append({"label": False, "pope": {"base_answer": True, "v": .05}})
     tuned = tune_thresholds(rows, grounding_threshold=.3)
     assert tuned["f1"] == 1.0 and tuned["tau_lo"] >= .1 and tuned["tau_hi"] > tuned["tau_lo"]
+
+
+def _pope_tune_rows(tmp_path):
+    """Token confidence perfectly calibrated, visual score only partly: an unconstrained ECE search picks lambda_v = 0."""
+    rows = []
+    for i in range(60):
+        label = i % 3 != 0
+        rows.append({"label": label, "pope": {"base_answer": True, "v": .9 if i % 2 else .6, "p": 1.0 if label else 0.0}})
+    path = tmp_path / "pope_tune.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+    return path
+
+
+def test_tuning_keeps_config_reliability_weights_by_default(tmp_path):
+    out = tmp_path / "tuned.yaml"
+    tune_main(["--proc", str(_pope_tune_rows(tmp_path)), "--write", str(out)])
+    import yaml
+    tuned = yaml.safe_load(out.read_text())
+    assert "reliability" not in tuned and "per_type" in tuned["decision"]
+    assert tuned["tuning"]["weights"]["applied"] is False
+    assert tuned["tuning"]["weights"]["unconstrained_search"]["lambda_verification"] == 0.0
+
+
+def test_opt_in_weight_tuning_respects_the_visual_floor(tmp_path):
+    out = tmp_path / "tuned.yaml"
+    tune_main(["--proc", str(_pope_tune_rows(tmp_path)), "--write", str(out), "--tune-weights", "--min-visual-weight", ".5"])
+    import yaml
+    tuned = yaml.safe_load(out.read_text())
+    assert tuned["tuning"]["weights"]["selected"]["lambda_verification"] >= .5
+    assert tuned["reliability"]["lambda_verification"] >= tuned["reliability"]["lambda_probability"]

@@ -59,11 +59,15 @@ class VerificationCache:
                     except (json.JSONDecodeError, KeyError):
                         continue
 
-    def get(self, key: str) -> dict | None:
-        row = self._data.get(key)
-        if row is None and self.cache_only:
+    def get(self, key: str, *fallbacks: str) -> dict | None:
+        """First cached row among ``key`` and ``fallbacks``; a miss on all of them raises in cache-only mode."""
+        for candidate in (key, *fallbacks):
+            row = self._data.get(candidate)
+            if row is not None:
+                return row
+        if self.cache_only:
             raise CacheMiss(f"No cached verifier output for {key}")
-        return row
+        return None
 
     def put(self, key: str, value: dict) -> None:
         row = {"key": key, **value}

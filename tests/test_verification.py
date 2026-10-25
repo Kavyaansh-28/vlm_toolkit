@@ -29,7 +29,7 @@ def test_cache_only_raises_instead_of_loading_models(tmp_path):
         CachedGrounder(CountingGrounder(), VerificationCache(tmp_path / "c.jsonl", cache_only=True)).detect(str(image), "cat")
 
 
-def test_cpu_resized_detections_never_share_cache_entries_with_full_resolution(tmp_path):
+def test_full_resolution_runs_never_read_cpu_resized_cache_entries(tmp_path):
     assert GroundingDINO(device="cpu", cpu_image_size=(480, 800)).cache_tag() == "480x800"
     assert GroundingDINO(device="cuda", cpu_image_size=(480, 800)).cache_tag() == ""
     assert GroundingDINO(device="cpu").cache_tag() == ""
@@ -37,9 +37,20 @@ def test_cpu_resized_detections_never_share_cache_entries_with_full_resolution(t
     cache = VerificationCache(tmp_path / "cache.jsonl")
     full, resized = CountingGrounder(), CountingGrounder()
     resized.cache_tag = lambda: "480x800"
-    CachedGrounder(full, cache).detect(str(image), "dog")
     CachedGrounder(resized, cache).detect(str(image), "dog")
+    CachedGrounder(full, cache).detect(str(image), "dog")
     assert full.calls == resized.calls == 1
+
+
+def test_cpu_cache_only_reprocessing_reuses_full_resolution_gpu_results(tmp_path):
+    image = tmp_path / "a.png"; Image.new("RGB", (8, 8)).save(image)
+    path = tmp_path / "cache.jsonl"
+    CachedGrounder(CountingGrounder(), VerificationCache(path)).detect(str(image), "dog")  # e.g. Kaggle GPU run
+    laptop = CountingGrounder(); laptop.cache_tag = lambda: "480x800"
+    result = CachedGrounder(laptop, VerificationCache(path, cache_only=True)).detect(str(image), "dog")
+    assert laptop.calls == 0 and result.scores == [.7]
+    with pytest.raises(CacheMiss):
+        CachedGrounder(laptop, VerificationCache(path, cache_only=True)).detect(str(image), "cat")
 
 
 def test_outage_is_never_cached(tmp_path):
