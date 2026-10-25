@@ -1,13 +1,24 @@
 vlm:
-  provider: groq
-  model: gpt-4.1-mini
+  provider: gemini
+  model: gemini-2.5-flash
   candidate_count: 3
 reliability:
-  lambda_verification: 0.7
-  lambda_probability: 0.0
-  lambda_agreement: 0.3
-  high_threshold: 0.80
-  low_threshold: 0.40
+  lambda_verification: 0.6
+  lambda_probability: 0.2
+  lambda_agreement: 0.2
+  high_threshold: 0.70
+  low_threshold: 0.30
 verification:
-  method: independent_vlm_claim_verification
-  batch_claims: true
+  method: grounding_dino_plus_region_probe
+  grounding_model: IDEA-Research/grounding-dino-tiny
+  grounding_threshold: 0.30
+  attribute_model: openai/clip-vit-base-patch32
+  attribute_threshold: 0.50
+  # Set true for reproducible/offline runs after model weights are cached.
+  local_files_only: false
+generation:
+  num_candidates: 3
+  temperature: 0.7
+decision:
+  tau_lo: 0.30
+  tau_hi: 0.70

@@ -21,6 +21,11 @@ DEFAULTS = {
 KEYS = {"openai": "OPENAI_API_KEY", "groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY", "llama": "LLAMA_API_KEY"}
 
 
+def _configured_secret(value: str | None) -> bool:
+    """Treat copied template placeholders as absent credentials."""
+    return bool(value and value.strip() and "your_" not in value.lower() and "api_key_here" not in value.lower())
+
+
 class VLMProvider(ABC):
     """Common image+prompt interface used by both generator and verifier roles."""
 
@@ -106,6 +111,15 @@ def providers() -> list[str]:
     return list(DEFAULTS)
 
 
+def provider_models() -> list[dict[str, str]]:
+    """Public configuration safe for the UI: IDs for routing, model IDs for display.
+
+    API keys are deliberately never included in this payload.
+    """
+    return [{"id": name, "model": os.getenv(f"{name.upper()}_MODEL") or DEFAULTS[name]}
+            for name in providers()]
+
+
 def get_provider(name: str) -> VLMProvider | None:
     """Resolve a configured provider adapter; credentials are read only server-side."""
     name = name.lower()
@@ -118,7 +132,7 @@ def get_provider(name: str) -> VLMProvider | None:
         if not base_url:
             return None
         return OpenAICompatibleProvider(name, model, key or "local", base_url)
-    if not key:
+    if not _configured_secret(key):
         return None
     if name == "gemini":
         return GeminiProvider(model, key)
@@ -133,7 +147,7 @@ def _missing_config(provider: str) -> dict[str, Any]:
         if provider.lower() == "llama" and not os.getenv("LLAMA_BASE_URL"):
             return {"response": "", "model": model, "provider": provider,
                     "error": "LLAMA_BASE_URL is not configured. Add your OpenAI-compatible Llama vision endpoint to .env."}
-        if not os.getenv(key_name):
+        if not _configured_secret(os.getenv(key_name)):
             return {"response": "", "model": model, "provider": provider,
                     "error": f"{key_name} is not configured. Add it to .env or choose another provider."}
     return {"response": "", "model": "", "provider": provider, "error": f"Unknown provider: {provider}."}

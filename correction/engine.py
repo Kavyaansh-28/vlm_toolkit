@@ -9,8 +9,12 @@ def correct(candidate: Candidate) -> None:
         claim = claims[item.claim_id]
         # Unsupported or ambiguous is not proof of an error: never delete/correct
         # a claim without a contradicted claim-level signal.
-        if item.status == "CONTRADICTED" and item.diagnosis == "OBJECT_HALLUCINATION":
+        if (item.status == "CONTRADICTED" and item.diagnosis == "OBJECT_HALLUCINATION") or (
+            item.status == "UNSUPPORTED" and item.diagnosis == "UNSUPPORTED_CLAIM" and item.score <= .30 and claim.type == "object"):
             diagnoses.append("OBJECT_HALLUCINATION")
+            # Prefer removing a short attachment phrase, preserving grammatical
+            # surrounding claims (e.g. "holding a surfboard").
+            text = re.sub(r"\s+(?:holding|carrying|with)\s+(?:a|an|the)\s+" + re.escape(claim.subject) + r"s?\b", "", text, flags=re.I)
             text = re.sub(r"(?:,?\s*(?:and\s+)?(?:a|an|the)?\s*" + re.escape(claim.subject) + r"s?)\b", "", text, flags=re.I)
         elif item.status == "CONTRADICTED" and item.diagnosis == "ATTRIBUTE_BINDING_ERROR" and item.verified_value:
             diagnoses.append("ATTRIBUTE_BINDING_ERROR")

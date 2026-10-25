@@ -34,6 +34,7 @@ class Evidence:
     diagnosis: str | None = None
     binding_status: str | None = None
     instance_ids: list[str] = field(default_factory=list)
+    region_crop: str | None = None
 
 @dataclass
 class Candidate:
@@ -54,6 +55,8 @@ class Candidate:
     verifier_provider: str = ""
     verifier_model: str = ""
     latency_ms: int | None = None
+    generation_strategy: str = ""
+    stage_latency_ms: dict[str, int] = field(default_factory=dict)
 
     def export(self) -> dict[str, Any]:
         return {**asdict(self), "original_response": self.text,

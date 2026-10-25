@@ -49,9 +49,14 @@ def score(candidate: Candidate, weights: dict[str, float], high=.80, low=.40) ->
     candidate.reliability = round(max(0.0, min(1.0, visual_score)), 2)
 
     statuses = {e.status for e in candidate.evidence}
-    actionable = any(e.status == "CONTRADICTED" and e.evidence_quality and e.evidence_quality >= .8 and
-                     e.diagnosis in {"OBJECT_HALLUCINATION", "ATTRIBUTE_BINDING_ERROR", "ATTRIBUTE_ERROR", "QUANTITY_ERROR"}
-                     for e in candidate.evidence)
+    # A detector-backed missing object is a conservative deletion case under
+    # the paper's policy.  Other UNSUPPORTED/AMBIGUOUS claims still abstain.
+    actionable = any(
+        (e.status == "CONTRADICTED" and e.evidence_quality and e.evidence_quality >= .8 and
+         e.diagnosis in {"OBJECT_HALLUCINATION", "ATTRIBUTE_BINDING_ERROR", "ATTRIBUTE_ERROR", "QUANTITY_ERROR"}) or
+        (e.status == "UNSUPPORTED" and e.evidence_quality and e.evidence_quality >= .8 and e.score <= low and
+         e.diagnosis == "UNSUPPORTED_CLAIM")
+        for e in candidate.evidence)
     if actionable:
         candidate.decision = "CORRECT"
     elif "AMBIGUOUS" in statuses or "UNSUPPORTED" in statuses:

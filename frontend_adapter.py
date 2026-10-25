@@ -14,6 +14,7 @@ import json
 import socket
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -24,7 +25,7 @@ from claims.graph import graph_data
 from core.pipeline import run
 from database.db import recent, save
 from evaluation.metrics import classification_metrics
-from vlm import providers
+from vlm import provider_models, providers
 
 ROOT = Path(__file__).resolve().parent
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
@@ -117,11 +118,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             config = yaml.safe_load((ROOT / "config/config.yaml").read_text())
             options = providers()
+            models = provider_models()
             default = config.get("vlm", {}).get("provider")
             reliability = config.get("reliability", {})
             vlm = config.get("vlm", {})
             self._send(200, {
                 "providers": options,
+                "models": models,
                 "provider": default if default in options else (options[0] if options else ""),
                 "defaults": {
                     "candidate_count": vlm.get("candidate_count", 3),
@@ -191,11 +194,10 @@ class Handler(BaseHTTPRequestHandler):
             high = _number(body.get("high_threshold", 0.8), 0.5, 1)
             low = _number(body.get("low_threshold", 0.4), 0, 0.5)
             provider = str(body.get("provider", ""))
-            verifier_provider = str(body.get("verifier_provider") or provider)
-            if provider not in providers() or verifier_provider not in providers():
-                raise ValueError("Select configured generator and verifier VLM providers")
+            if provider not in providers():
+                raise ValueError("Select a configured generator VLM provider")
             manual = str(body.get("manual_response", ""))[:12000]
-            candidates, error = run(image_path, query, count, weight_values, manual, high, low, provider, verifier_provider)
+            candidates, error = run(image_path, query, count, weight_values, manual, high, low, provider)
             if not candidates:
                 self._send(502, {"error": error or "Verification engine unavailable"})
                 return
@@ -204,11 +206,19 @@ class Handler(BaseHTTPRequestHandler):
             for candidate, exported in zip(candidates, stored_candidates):
                 response_candidates.append({**exported, "graph": graph_data(candidate.claims)})
             image_id = hashlib.sha256(image_bytes).hexdigest()
-            configuration = {"generator_provider": provider, "verifier_provider": verifier_provider,
+            configuration = {"generator_provider": provider, "visual_verifier": "Grounding DINO + region-level CLIP probe",
                              "candidate_count": count, "weights": weight_values,
                              "high_threshold": high, "low_threshold": low}
-            stored_payload = {"query": query, "image_id": image_id, "configuration": configuration,
-                              "candidates": stored_candidates}
+            stage_latency = {candidate.id: candidate.stage_latency_ms for candidate in candidates}
+            stored_payload = {"timestamp": datetime.now(timezone.utc).isoformat(), "image_hash": image_id,
+                              "query": query, "model": [candidate.model for candidate in candidates],
+                              "configuration": configuration, "candidates": stored_candidates,
+                              "claims": [claim for candidate in stored_candidates for claim in candidate["claims"]],
+                              "verification_results": [evidence for candidate in stored_candidates for evidence in candidate["evidence"]],
+                              "reliability_scores": {candidate.id: candidate.reliability for candidate in candidates},
+                              "decision": [candidate.decision for candidate in candidates],
+                              "corrected_response": [candidate.corrected_text for candidate in candidates],
+                              "latency_ms": stage_latency}
             experiment_id = save(query, stored_payload)
             self._send(200, {"experiment_id": experiment_id,
                              "analysis": {"query": query, "image_id": image_id,

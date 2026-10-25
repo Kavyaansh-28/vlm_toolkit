@@ -29,5 +29,5 @@ export type Candidate = {
 export type AnalysisPayload = { query: string; image_id?: string; experiment_id?: number; candidates: Candidate[] };
 export type HistorySummary = { id: number; created_at: string; query: string };
 export type HistoryItem = HistorySummary & { payload: AnalysisPayload };
-export type AppConfig = { providers: string[]; provider: string; defaults: { candidate_count: number; verification_weight: number; agreement_weight: number; high_threshold: number; low_threshold: number } };
+export type AppConfig = { providers: string[]; models: { id: string; model: string }[]; provider: string; defaults: { candidate_count: number; verification_weight: number; agreement_weight: number; high_threshold: number; low_threshold: number } };
 export type Evaluation = { available: boolean; message?: string; calibration_available?: boolean; sample_count?: number };

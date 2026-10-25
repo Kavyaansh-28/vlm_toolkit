@@ -13,7 +13,7 @@ export const getHistory = () => request<HistorySummary[]>("/api/history");
 export const getHistoryItem = (id: number) => request<HistoryItem>(`/api/history/${id}`);
 
 export async function analyzeImage(input: {
-  file: File; query: string; candidateCount: number; provider: string; verifierProvider: string;
+  file: File; query: string; candidateCount: number; provider: string;
   manualResponse: string; verificationWeight: number; agreementWeight: number;
   highThreshold: number; lowThreshold: number;
 }): Promise<{ analysis: AnalysisPayload; experiment_id?: number; warning?: string | null }> {
@@ -24,7 +24,7 @@ export async function analyzeImage(input: {
   for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   return request("/api/analyze", { method: "POST", body: JSON.stringify({
     filename: input.file.name, image_base64: btoa(binary), query: input.query,
-    candidate_count: input.candidateCount, provider: input.provider, verifier_provider: input.verifierProvider,
+    candidate_count: input.candidateCount, provider: input.provider,
     manual_response: input.manualResponse, weights: { verification: input.verificationWeight, agreement: input.agreementWeight },
     high_threshold: input.highThreshold, low_threshold: input.lowThreshold,
   }) });
