@@ -7,6 +7,7 @@ result rather than a fabricated detection score.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Protocol
@@ -29,13 +30,17 @@ class Grounder(Protocol):
 
 
 def _post_process(processor, outputs, input_ids, threshold: float, target_sizes):
-    # transformers renamed ``box_threshold`` to ``threshold``; support both.
-    try:
-        return processor.post_process_grounded_object_detection(
-            outputs, input_ids, threshold=threshold, text_threshold=threshold, target_sizes=target_sizes)[0]
-    except TypeError:
-        return processor.post_process_grounded_object_detection(
-            outputs, input_ids, box_threshold=threshold, text_threshold=threshold, target_sizes=target_sizes)[0]
+    # transformers renamed ``box_threshold`` to ``threshold``; pick the keyword from the
+    # signature rather than catching TypeError, which could mask unrelated errors.
+    post_process = processor.post_process_grounded_object_detection
+    parameters = inspect.signature(post_process).parameters
+    if "threshold" in parameters:
+        score_threshold = {"threshold": threshold}
+    elif "box_threshold" in parameters:
+        score_threshold = {"box_threshold": threshold}
+    else:
+        raise TypeError("Grounding DINO post-processor has no supported box-threshold parameter")
+    return post_process(outputs, input_ids, **score_threshold, text_threshold=threshold, target_sizes=target_sizes)[0]
 
 
 class GroundingDINO:
@@ -80,7 +85,7 @@ class GroundingDINO:
             # Grounding DINO uses dot-separated noun phrases as its text prompt.
             prompt = object_name.strip().lower().rstrip(".") + "."
             inputs = self._processor(images=image, text=prompt, return_tensors="pt").to(self.device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 outputs = self._model(**inputs)
             result = _post_process(self._processor, outputs, inputs.input_ids, self.threshold, [image.size[::-1]])
             boxes = [[round(float(x), 2) for x in box.tolist()] for box in result.get("boxes", [])]
