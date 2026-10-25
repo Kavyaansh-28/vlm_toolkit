@@ -1,0 +1,2 @@
+# Optional: 4-bit LLaVA fallback on CUDA GPUs (Kaggle T4, Lenovo RTX 3050).
+bitsandbytes>=0.44

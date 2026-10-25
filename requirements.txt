@@ -1,13 +1,22 @@
-streamlit>=1.38
-openai>=1.40
-google-genai>=1.0
+# Core pipeline + API
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.0
 python-dotenv>=1.0
+PyYAML>=6.0
 Pillow>=10.0
 numpy>=1.26
-pandas>=2.1
-streamlit-paste-button>=0.1.2
-PyYAML>=6.0
-plotly>=5.24
-pytest>=8.0
+# Generator VLM providers (API)
+openai>=1.40
+google-genai>=1.0
+# Visual verifiers + local VLM (install a CUDA/MPS torch build first where available)
 torch>=2.2
-transformers>=4.47
+transformers>=4.45,<5
+accelerate>=0.34
+# Benchmarks and result sharing
+datasets>=2.20
+huggingface_hub>=0.34
+tqdm>=4.66
+# Tests
+pytest>=8.0
+httpx>=0.27

@@ -2,10 +2,20 @@
 .venv/
 __pycache__/
 *.py[cod]
-.streamlit/
+.pytest_cache/
+.DS_Store
 node_modules/
 .next/
-out/
 frontend/.next/
 frontend/node_modules/
+out/
 *.tsbuildinfo
+.streamlit/
+# Benchmark data and raw outputs live in the HF dataset repo, not in git.
+data/*
+!data/coco_synonyms.txt
+results/gen/
+results/proc/
+results/cache/
+results/smoke/
+results/tuned.yaml

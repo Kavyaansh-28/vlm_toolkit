@@ -1,21 +1,24 @@
-import type { AnalysisPayload, AppConfig, Evaluation, HistoryItem, HistorySummary } from "@/lib/types";
+import type { AnalysisPayload, AppConfig, BenchmarkReport, Evaluation, HistoryItem, HistorySummary, ReviewItem } from "@/lib/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, headers: { ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers }, cache: "no-store" });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status})`);
+  if (!response.ok) throw new Error((typeof data.detail === "string" ? data.detail : data.error) ?? `Request failed (${response.status})`);
   return data as T;
 }
 
 export const getConfig = () => request<AppConfig>("/api/config");
 export const getEvaluation = () => request<Evaluation>("/api/evaluation");
+export const getBenchmarks = () => request<BenchmarkReport>("/api/benchmarks");
 export const getHistory = () => request<HistorySummary[]>("/api/history");
 export const getHistoryItem = (id: number) => request<HistoryItem>(`/api/history/${id}`);
+export const getReview = () => request<ReviewItem[]>("/api/review");
+export const postReview = (body: { experiment_id: number; claim_id: string; label: "correct" | "incorrect" | "unsure"; note?: string }) =>
+  request<{ status: string }>("/api/review", { method: "POST", body: JSON.stringify(body) });
 
 export async function analyzeImage(input: {
   file: File; query: string; candidateCount: number; provider: string;
   manualResponse: string; verificationWeight: number; agreementWeight: number;
-  highThreshold: number; lowThreshold: number;
 }): Promise<{ analysis: AnalysisPayload; experiment_id?: number; warning?: string | null }> {
   const buffer = await input.file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -26,6 +29,5 @@ export async function analyzeImage(input: {
     filename: input.file.name, image_base64: btoa(binary), query: input.query,
     candidate_count: input.candidateCount, provider: input.provider,
     manual_response: input.manualResponse, weights: { verification: input.verificationWeight, agreement: input.agreementWeight },
-    high_threshold: input.highThreshold, low_threshold: input.lowThreshold,
   }) });
 }

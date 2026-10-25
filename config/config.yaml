@@ -1,24 +1,38 @@
+# Single source of truth for the toolkit. results/tuned.yaml (written by
+# evaluation/tune.py on the held-out split) overrides matching keys.
 vlm:
   provider: gemini
-  model: gemini-2.5-flash
-  candidate_count: 3
+  hf_model: llava-hf/llava-1.5-7b-hf
+  hf_precision: fp16          # fp16 | 4bit
+generation:
+  num_candidates: 3
+  temperature: 0.7
+  max_new_tokens: 128
+  seed: 42
 reliability:
   lambda_verification: 0.6
   lambda_probability: 0.2
   lambda_agreement: 0.2
-  high_threshold: 0.70
-  low_threshold: 0.30
-verification:
-  method: grounding_dino_plus_region_probe
-  grounding_model: IDEA-Research/grounding-dino-tiny
-  grounding_threshold: 0.30
-  attribute_model: openai/clip-vit-base-patch32
-  attribute_threshold: 0.50
-  # Set true for reproducible/offline runs after model weights are cached.
-  local_files_only: false
-generation:
-  num_candidates: 3
-  temperature: 0.7
+  rerank_threshold: 0.5
 decision:
   tau_lo: 0.30
   tau_hi: 0.70
+  # Per-claim-type thresholds. Starting values matched to the score ranges of
+  # grounding-dino-tiny (s_obj) and d_b * P(a|crop) (s_attr); replaced by tuning.
+  per_type:
+    object: {tau_lo: 0.30, tau_hi: 0.45}
+    quantity: {tau_lo: 0.30, tau_hi: 0.45}
+    relation: {tau_lo: 0.30, tau_hi: 0.45}
+    attribute: {tau_lo: 0.15, tau_hi: 0.40}
+verification:
+  grounding_model: IDEA-Research/grounding-dino-tiny
+  grounding_threshold: 0.30
+  detect_floor: 0.10
+  attribute_model: openai/clip-vit-base-patch32
+  attribute_threshold: 0.50
+  device: auto                # auto | cuda | mps | cpu
+  # Set true for reproducible/offline runs after model weights are cached.
+  local_files_only: false
+  cache_dir: results/cache
+claims:
+  use_llm: false

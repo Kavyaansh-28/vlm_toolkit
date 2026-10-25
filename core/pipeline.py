@@ -1,51 +1,96 @@
+"""Inference-time pipeline: candidates -> claims -> verification -> R_j -> policy -> correction."""
 from __future__ import annotations
-from time import perf_counter
-from claims.extractor import extract
-from correction.engine import correct
-from core.schemas import Candidate
-from reliability.engine import agreement, score
-from verification.service import verify
-from vlm import generate_vlm_response
-from vlm_engine import ProviderVLMEngine
 
-def run(image_path: str, query: str, candidate_count: int, weights: dict[str, float], manual_text: str = "", high: float = .80, low: float = .40, provider: str = "openai") -> tuple[list[Candidate], str | None]:
-    manual = [x.strip() for x in manual_text.split("|||") if x.strip()]
-    candidates, error = [], None
-    engine = ProviderVLMEngine(provider)
-    generated_rows = [] if manual else engine.generate_candidates(image_path, query, candidate_count)
-    for index in range(candidate_count):
-        started = perf_counter()
-        model_probability, model_probability_available = None, False
-        if manual:
-            text, model = manual[index % len(manual)], "manual candidate"
-        else:
-            generated = generated_rows[index]
-            text, model, error = generated.get("response", ""), generated.get("model", ""), generated.get("error")
-            model_probability = generated.get("probability")
-            model_probability_available = bool(generated.get("probability_available") and model_probability is not None)
-            if not text: break
-        candidate = Candidate(f"candidate-{index+1}", text, model, claims=extract(text),
-                              generator_provider=provider, verifier_provider="Grounding DINO + CLIP region probe",
-                              probability=model_probability, probability_available=model_probability_available)
-        candidate.generation_strategy = "manual_override" if manual else generated.get("generation_strategy", "repeated_controlled_generation_not_native_nbest")
-        verification_started = perf_counter()
-        candidate.evidence = verify(image_path, candidate.claims)
-        candidate.stage_latency_ms["verification"] = round((perf_counter() - verification_started) * 1000)
-        if candidate.evidence:
-            candidate.verifier_model = "Grounding DINO + CLIP region probe"
+from time import perf_counter
+
+from claims.extractor import extract
+from core.config import PipelineConfig, load_config
+from core.policy import assign_actions, select
+from core.schemas import Candidate
+from correction.engine import correct
+from reliability.engine import agreement, score
+
+VERIFIER_NAME = "Grounding DINO + CLIP region probe"
+
+__all__ = ["PipelineConfig", "load_config", "process_candidates", "run", "rows_from_manual"]
+
+
+def _candidate(index: int, row: dict, provider: str) -> Candidate:
+    probability = row.get("probability")
+    return Candidate(
+        f"candidate-{index + 1}", row.get("response", row.get("text", "")) or "", row.get("model", ""),
+        generator_provider=provider, verifier_provider=VERIFIER_NAME,
+        probability=probability, probability_available=bool(row.get("probability_available", probability is not None) and probability is not None),
+        num_tokens=row.get("num_tokens"), latency_ms=row.get("latency_ms"),
+        generation_strategy=row.get("generation_strategy", row.get("strategy", "")))
+
+
+def process_candidates(image_path: str, rows: list[dict], cfg: PipelineConfig, provider: str = "",
+                       verify_fn=None) -> list[Candidate]:
+    """Score and correct generated candidates; the SELECTED candidate is returned first.
+
+    ``rows`` follow the VLM-engine contract (``response``/``probability``/...).
+    ``verify_fn(image_path, claims, attribute=bool)`` defaults to the visual verifier.
+    """
+    if verify_fn is None:
+        from verification.service import verify as verify_fn
+    rows = [row for row in rows[:max(1, cfg.candidate_count)] if (row.get("response") or row.get("text"))]
+    candidates = []
+    for index, row in enumerate(rows):
+        candidate = _candidate(index, row, provider)
+        candidate.claims = extract(candidate.text)
+        if cfg.verification:
+            started = perf_counter()
+            candidate.evidence = verify_fn(image_path, candidate.claims, attribute=cfg.attribute_verifier)
+            candidate.stage_latency_ms["verification"] = round((perf_counter() - started) * 1000)
+            candidate.verifier_model = VERIFIER_NAME
         candidates.append(candidate)
-        candidate.latency_ms = round((perf_counter() - started) * 1000)
-        candidate.stage_latency_ms["total"] = candidate.latency_ms
-    original_id = candidates[0].id if candidates else None
+    if not candidates:
+        return []
+
+    if not cfg.verification:  # base-VLM baseline: the uncorrected greedy response
+        for candidate in candidates:
+            candidate.corrected_text, candidate.decision = candidate.text, "ACCEPT"
+            candidate.decision_reason = "Verification disabled (uncorrected baseline)."
+        candidates[0].selected = True
+        return candidates
+
     agreement(candidates)
     for candidate in candidates:
-        score(candidate, weights, high, low); correct(candidate)
-    # Prefer a materially stronger candidate instead of blindly preserving candidate 1.
-    candidates.sort(key=lambda item: item.reliability, reverse=True)
-    # Reranking is only a selection action after the winner independently passed
-    # the accept policy; it must not erase ambiguity/contradiction abstentions.
-    if (len(candidates) > 1 and candidates[0].id != original_id and
-            candidates[0].decision == "ACCEPT" and
-            candidates[0].reliability - next((c.reliability for c in candidates if c.id == original_id), 0.0) >= .15):
-        candidates[0].decision = "RERANK"
+        score(candidate, cfg)
+        assign_actions(candidate, cfg)
+    chosen, decision, reason = select(candidates, cfg)
+    for index, candidate in enumerate(candidates):
+        correct(candidate)
+        if index != chosen:
+            # Non-selected candidates keep their own policy outcome for inspection.
+            _, own, own_reason = select([candidate], cfg.with_overrides(reliability=False))
+            candidate.decision, candidate.decision_reason = own, own_reason
+    selected = candidates[chosen]
+    selected.selected, selected.decision, selected.decision_reason = True, decision, reason
+    return [selected] + [c for i, c in enumerate(candidates) if i != chosen]
+
+
+def rows_from_manual(manual_text: str) -> list[dict]:
+    return [{"response": part.strip(), "model": "manual candidate", "generation_strategy": "manual_override"}
+            for part in manual_text.split("|||") if part.strip()]
+
+
+def run(image_path: str, query: str, provider: str, cfg: PipelineConfig | None = None,
+        manual_text: str = "") -> tuple[list[Candidate], str | None]:
+    """Live path used by the API: generate candidates, then process them."""
+    cfg = cfg or load_config()
+    error = None
+    started = perf_counter()
+    if manual_text.strip():
+        rows = rows_from_manual(manual_text)
+    else:
+        from vlm_engine import get_engine
+        rows = get_engine(provider).generate_candidates(image_path, query, cfg.candidate_count)
+        error = next((row.get("error") for row in rows if row.get("error")), None)
+    generation_ms = round((perf_counter() - started) * 1000)
+    candidates = process_candidates(image_path, rows, cfg, provider)
+    for candidate in candidates:
+        candidate.stage_latency_ms["generation_total"] = generation_ms
+        candidate.stage_latency_ms["total"] = generation_ms + candidate.stage_latency_ms.get("verification", 0)
     return candidates, error

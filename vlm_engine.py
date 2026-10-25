@@ -1,5 +1,11 @@
-"""Black-box VLM execution abstraction and reproducible repeated sampling."""
+"""Black-box / white-box VLM execution abstraction (paper Sec. IV-A).
+
+``hf-local`` runs a Hugging Face VLM on this machine and exposes real n-best
+sampling plus token probabilities.  API providers cannot return native n-best
+lists, so their candidates are repeated calls and are labelled as such.
+"""
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -15,20 +21,29 @@ class VLMEngine(Protocol):
 @dataclass
 class ProviderVLMEngine:
     provider: str
+    temperature: float = .7
 
     def generate(self, image_path: str, query: str, **kwargs) -> dict:
-        return generate_vlm_response(image_path, query, self.provider)
+        return generate_vlm_response(image_path, query, self.provider, temperature=kwargs.get("temperature"))
 
     def get_token_confidence(self, response: dict) -> float | None:
         value = response.get("probability")
         return float(value) if response.get("probability_available") and value is not None else None
 
     def generate_candidates(self, image_path: str, query: str, n: int, **kwargs) -> list[dict]:
-        # Provider adapters do not expose native n-best logits. These are
-        # repeated controlled generations, explicitly labelled as such.
+        # Candidate 1 uses temperature 0 (closest to greedy); the rest are sampled.
         results = []
         for index in range(n):
-            item = self.generate(image_path, query + f"\nCandidate sample {index + 1} of {n}.")
-            item["generation_strategy"] = "repeated_controlled_generation_not_native_nbest"
+            item = self.generate(image_path, query, temperature=0.0 if index == 0 else kwargs.get("temperature", self.temperature))
+            item["generation_strategy"] = "repeated_api_calls"
             results.append(item)
         return results
+
+
+def get_engine(provider: str) -> VLMEngine:
+    if provider == "hf-local":
+        from core.config import raw_config
+        from models.hf_vlm import load_engine
+        options = raw_config().get("vlm", {})
+        return load_engine(str(options.get("hf_model", "llava-hf/llava-1.5-7b-hf")), str(options.get("hf_precision", "fp16")))
+    return ProviderVLMEngine(provider)

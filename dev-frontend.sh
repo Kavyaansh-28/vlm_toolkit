@@ -24,10 +24,11 @@ if frontend_is_ours && http_ok "$API_URL/health"; then
 fi
 
 PYTHON_BIN="${PYTHON:-$ROOT_DIR/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$ROOT_DIR/.venv/Scripts/python.exe"
 if [[ ! -x "$PYTHON_BIN" ]]; then PYTHON_BIN=python3; fi
 API_PID=""
 if ! http_ok "$API_URL/health"; then
-  "$PYTHON_BIN" frontend_adapter.py &
+  "$PYTHON_BIN" -m uvicorn api.server:app --host 127.0.0.1 --port "$API_PORT" &
   API_PID=$!
   for _ in {1..30}; do
     if http_ok "$API_URL/health"; then break; fi
