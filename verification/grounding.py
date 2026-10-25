@@ -7,6 +7,7 @@ result rather than a fabricated detection score.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -63,10 +64,20 @@ class GroundingDINO:
             # Grounding DINO uses dot-separated noun phrases as its text prompt.
             prompt = object_name.strip().lower().rstrip(".") + "."
             inputs = self._processor(images=image, text=prompt, return_tensors="pt")
-            outputs = self._model(**inputs)
+            import torch
+            with torch.inference_mode():
+                outputs = self._model(**inputs)
             target_sizes = [image.size[::-1]]
-            result = self._processor.post_process_grounded_object_detection(
-                outputs, inputs.input_ids, box_threshold=self.threshold, text_threshold=self.threshold,
+            post_process = self._processor.post_process_grounded_object_detection
+            parameters = inspect.signature(post_process).parameters
+            if "box_threshold" in parameters:
+                score_threshold = {"box_threshold": self.threshold}
+            elif "threshold" in parameters:
+                score_threshold = {"threshold": self.threshold}
+            else:
+                raise TypeError("Grounding DINO post-processor has no supported box-threshold parameter")
+            result = post_process(
+                outputs, inputs.input_ids, **score_threshold, text_threshold=self.threshold,
                 target_sizes=target_sizes,
             )[0]
             boxes = [[round(float(x), 2) for x in box.tolist()] for box in result.get("boxes", [])]
@@ -75,4 +86,3 @@ class GroundingDINO:
         except Exception as exc:
             return GroundingResult(object_name, available=False,
                                    reason=f"Grounding DINO inference failed: {type(exc).__name__}: {str(exc)[:180]}")
-
