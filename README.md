@@ -87,7 +87,11 @@ python -m evaluation.run_benchmarks --proc results/proc --out results/benchmark_
 ```bash
 python -m evaluation.tune --proc results/proc/full_toolkit/pope_tune.jsonl --write results/tuned.yaml
 python -m evaluation.process --gen results/gen/pope_random.jsonl results/gen/pope_popular.jsonl results/gen/pope_adversarial.jsonl results/gen/chair.jsonl --all-ablations --cache-only
+python -m evaluation.run_benchmarks --proc results/proc --out results/benchmark_report.json --markdown results/RESULTS.md
 ```
+`--cache-only` loads no models. Rows whose recorded settings differ from the current config are recomputed; the rest are reused.
+
+**Reliability weights.** `evaluation.tune` tunes the per-claim thresholds but keeps the Eq. 3 weights from `config/config.yaml` (λ₁ = 0.6, λ₂ = 0.2, λ₃ = 0.2). The reason: POPE answers are a single yes/no token from one candidate, so p_j is trivially well calibrated there, and an unconstrained search sets λ₁ = 0. That would make R ignore the visual evidence on captions. The search result is still recorded under `tuning.weights` in `tuned.yaml`. To apply tuned weights, pass `--tune-weights`; λ₁ is then searched only at or above `--min-visual-weight` (default 0.5).
 
 **Pipeline stages** (each is a CLI and resumable):
 
