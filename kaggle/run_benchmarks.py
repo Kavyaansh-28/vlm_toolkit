@@ -2,6 +2,8 @@
 # Settings: Accelerator = GPU T4 x2, Internet = On.  Add-ons -> Secrets: HF_TOKEN (+ GH_TOKEN if the repo is private).
 # Checkpoint run: BENCHES = ["smoke"] in an interactive session.
 # Full run: BENCHES = ["pope", "chair"], then Save Version -> "Save & Run All (Commit)".
+# Everything under /kaggle/working is saved as notebook output, so the repository is
+# cloned to /tmp (never saved) and only results/ and logs are copied to /kaggle/working.
 
 # %% 1. Secrets, clone
 import os, subprocess, sys
@@ -20,9 +22,16 @@ except Exception:
     token = ""  # public repository
 os.environ["RESULTS_REPO"] = RESULTS_REPO
 os.environ["VLM_HARDWARE"] = "kaggle:t4"
-if not os.path.exists("/kaggle/working/vlm"):
-    subprocess.run(["git", "clone", "--depth", "1", "-b", BRANCH, f"https://{token}{REPO_URL}", "/kaggle/working/vlm"], check=True)
-os.chdir("/kaggle/working/vlm")
+WORKDIR = "/tmp/vlm"
+if not os.path.exists(WORKDIR):
+    clone = subprocess.run(["git", "clone", "--depth", "1", "-b", BRANCH, f"https://{token}{REPO_URL}", WORKDIR],
+                           capture_output=True, text=True)
+    if clone.returncode != 0:  # never echo the command line: it contains the token
+        raise RuntimeError(f"git clone of {REPO_URL}@{BRANCH} failed: {clone.stderr.replace(token, '***@') if token else clone.stderr}")
+    # Drop the credential from .git/config immediately; it is never needed again.
+    subprocess.run(["git", "-C", WORKDIR, "remote", "set-url", "origin", f"https://{REPO_URL}"], check=True)
+del token
+os.chdir(WORKDIR)
 subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv"])
 
 # %% 2. Install (keeps Kaggle's CUDA torch) and pull partial results for resume
@@ -49,11 +58,11 @@ for bench, proc in procs:
     print(bench, "exit code", proc.wait())
 subprocess.run("tail -n 25 /kaggle/working/*.log", shell=True)
 
-# %% 5. Report (also copied to /kaggle/working as notebook output)
+# %% 5. Report; copy results (never the repository) to /kaggle/working as notebook output
 if BENCHES != ["smoke"]:
     subprocess.run([sys.executable, "-m", "evaluation.run_benchmarks", "--proc", "results/proc",
                     "--out", "results/benchmark_report.json", "--markdown", "results/RESULTS.md"])
     subprocess.run([sys.executable, "-m", "evaluation.hub_sync", "push", "--repo", RESULTS_REPO,
                     "--patterns", "results/benchmark_report.json", "results/RESULTS.md"])
     print(open("results/RESULTS.md").read())
-subprocess.run("cp -r results /kaggle/working/results_copy", shell=True)
+subprocess.run("rm -rf /kaggle/working/results && cp -r results /kaggle/working/results", shell=True)

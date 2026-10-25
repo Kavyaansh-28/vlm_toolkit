@@ -10,6 +10,7 @@ min(s_subj, s_obj) for a relation whose geometry holds (else 0).
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,31 +22,39 @@ from verification.grounding import CachedGrounder, GroundingDINO
 from verification.object_verifier import ObjectVerifier
 
 _STATE: dict = {"verifiers": None, "cache_name": "verification", "cache_only": False, "device": None}
+_LOCK = threading.Lock()
 
 
 def configure(cache_name: str | None = None, cache_only: bool | None = None, device: str | None = None) -> None:
     """Select the cache file / offline mode; rebuilds the verifiers on next use."""
-    if cache_name is not None: _STATE["cache_name"] = cache_name
-    if cache_only is not None: _STATE["cache_only"] = cache_only
-    if device is not None: _STATE["device"] = device
-    _STATE["verifiers"] = None
+    with _LOCK:
+        if cache_name is not None: _STATE["cache_name"] = cache_name
+        if cache_only is not None: _STATE["cache_only"] = cache_only
+        if device is not None: _STATE["device"] = device
+        _STATE["verifiers"] = None
 
 
 def _verifiers() -> tuple[ObjectVerifier, AttributeVerifier, float]:
-    if _STATE["verifiers"] is None:
-        options = raw_config().get("verification", {})
-        local_only = bool(options.get("local_files_only", False))
-        device = _STATE["device"] or str(options.get("device", "auto"))
-        threshold = float(options.get("grounding_threshold", .30))
-        cache_dir = Path(options.get("cache_dir", "results/cache"))
-        cache_dir = cache_dir if cache_dir.is_absolute() else ROOT / cache_dir
-        cache = VerificationCache(cache_dir / f"{_STATE['cache_name']}.jsonl", _STATE["cache_only"])
-        grounder = CachedGrounder(GroundingDINO(str(options.get("grounding_model", "IDEA-Research/grounding-dino-tiny")),
-                                                float(options.get("detect_floor", .10)), local_only, device), cache)
-        probe = CLIPRegionProbe(str(options.get("attribute_model", "openai/clip-vit-base-patch32")), local_only, device)
-        _STATE["verifiers"] = (ObjectVerifier(grounder, threshold),
-                               AttributeVerifier(probe, float(options.get("attribute_threshold", .50)), cache), threshold)
-    return _STATE["verifiers"]
+    with _LOCK:
+        if _STATE["verifiers"] is None:
+            _STATE["verifiers"] = _build_verifiers()
+        return _STATE["verifiers"]
+
+
+def _build_verifiers() -> tuple[ObjectVerifier, AttributeVerifier, float]:
+    """Construct the verifiers (cheap); models load lazily, under their own locks."""
+    options = raw_config().get("verification", {})
+    local_only = bool(options.get("local_files_only", False))
+    device = _STATE["device"] or str(options.get("device", "auto"))
+    threshold = float(options.get("grounding_threshold", .30))
+    cache_dir = Path(options.get("cache_dir", "results/cache"))
+    cache_dir = cache_dir if cache_dir.is_absolute() else ROOT / cache_dir
+    cache = VerificationCache(cache_dir / f"{_STATE['cache_name']}.jsonl", _STATE["cache_only"])
+    grounder = CachedGrounder(GroundingDINO(str(options.get("grounding_model", "IDEA-Research/grounding-dino-tiny")),
+                                            float(options.get("detect_floor", .10)), local_only, device), cache)
+    probe = CLIPRegionProbe(str(options.get("attribute_model", "openai/clip-vit-base-patch32")), local_only, device)
+    return (ObjectVerifier(grounder, threshold),
+            AttributeVerifier(probe, float(options.get("attribute_threshold", .50)), cache), threshold)
 
 
 def _grounding_parts(evidence: Evidence) -> tuple[list[list[float]], list[float]]:

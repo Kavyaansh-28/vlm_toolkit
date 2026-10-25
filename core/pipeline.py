@@ -34,10 +34,18 @@ def process_candidates(image_path: str, rows: list[dict], cfg: PipelineConfig, p
     """
     if verify_fn is None:
         from verification.service import verify as verify_fn
-    rows = [row for row in rows[:max(1, cfg.candidate_count)] if (row.get("response") or row.get("text"))]
+    rows = rows[:max(1, cfg.candidate_count)]
+    if not any(row.get("response") or row.get("text") for row in rows):
+        return []
     candidates = []
     for index, row in enumerate(rows):
         candidate = _candidate(index, row, provider)
+        if not candidate.text.strip():
+            # Keep the slot: candidate 1 stays the greedy baseline even when it failed,
+            # so a sampled candidate can only replace it through the re-rank rule.
+            candidate.diagnosis = ["GENERATION_FAILED"]
+            candidate.decision_reason = f"Generation failed: {row.get('error') or 'empty response'}"
+            candidates.append(candidate); continue
         candidate.claims = extract(candidate.text)
         if cfg.verification:
             started = perf_counter()
@@ -61,6 +69,12 @@ def process_candidates(image_path: str, rows: list[dict], cfg: PipelineConfig, p
         assign_actions(candidate, cfg)
     chosen, decision, reason = select(candidates, cfg)
     for index, candidate in enumerate(candidates):
+        if "GENERATION_FAILED" in candidate.diagnosis:
+            candidate.decision = "ABSTAIN"
+            if index == chosen:
+                reason = f"{candidate.decision_reason}; no other candidate reaches R >= {cfg.rerank_threshold:.2f}."
+                decision = "ABSTAIN"
+            continue
         correct(candidate)
         if index != chosen:
             # Non-selected candidates keep their own policy outcome for inspection.
@@ -86,7 +100,8 @@ def run(image_path: str, query: str, provider: str, cfg: PipelineConfig | None =
         rows = rows_from_manual(manual_text)
     else:
         from vlm_engine import get_engine
-        rows = get_engine(provider).generate_candidates(image_path, query, cfg.candidate_count)
+        rows = get_engine(provider).generate_candidates(image_path, query, cfg.candidate_count, temperature=cfg.temperature,
+                                                        max_new_tokens=cfg.max_new_tokens, seed=cfg.seed)
         error = next((row.get("error") for row in rows if row.get("error")), None)
     generation_ms = round((perf_counter() - started) * 1000)
     candidates = process_candidates(image_path, rows, cfg, provider)

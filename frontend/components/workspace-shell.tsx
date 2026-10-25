@@ -117,13 +117,15 @@ function CorrectionPanel({ candidate }: { candidate: Candidate }) {
 
 function ActionTable({ candidate }: { candidate: Candidate }) {
   const selectClaim = useWorkspace((state) => state.selectClaim);
+  const selectedClaimId = useWorkspace((state) => state.selectedClaimId);
   const evidence = new Map(candidate.evidence.map((item) => [item.claim_id, item]));
   if (!candidate.claims.length) return <p className="text-xs text-zinc-600">No claims were extracted.</p>;
   return <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left text-[11px]">
     <thead><tr className="border-b border-white/[.07] text-[9px] uppercase tracking-[.12em] text-zinc-600"><th className="py-2 pr-3 font-medium">Claim</th><th className="py-2 pr-3 font-medium">Verification result</th><th className="py-2 pr-3 font-medium">vᵢ</th><th className="py-2 font-medium">Action</th></tr></thead>
     <tbody>{candidate.claims.map((claim) => { const item = evidence.get(claim.id); const action = candidate.claim_actions?.[claim.id]; const crop = item?.region_crop;
-      return <tr key={claim.id} onClick={() => selectClaim(claim.id)} className="cursor-pointer border-b border-white/[.04] align-top hover:bg-white/[.02]">
-        <td className="py-2.5 pr-3 text-zinc-200">{claimLabel(claim)}<div className="mono text-[9px] text-zinc-700">{claim.id}</div></td>
+      const active = selectedClaimId === claim.id;
+      return <tr key={claim.id} className={`border-b border-white/[.04] align-top ${active ? "bg-violet-200/[.045]" : "hover:bg-white/[.02]"}`}>
+        <td className="py-2.5 pr-3 text-zinc-200"><button type="button" onClick={() => selectClaim(active ? null : claim.id)} aria-pressed={active} aria-label={`Focus evidence for claim: ${claimLabel(claim)}`} className="rounded text-left hover:text-violet-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300">{claimLabel(claim)}<span className="mono block text-[9px] text-zinc-700">{claim.id}</span></button></td>
         <td className="py-2.5 pr-3 text-zinc-500"><div className="flex gap-2">{crop && <img src={crop} alt={`Region crop for ${claim.subject}`} className="size-9 shrink-0 rounded object-cover"/>}<span>{item ? <><Pill tone={statusTone(item.status)}>{item.status}</Pill> <span className="ml-1">{item.explanation}</span></> : "not verified (ablation)"}</span></div></td>
         <td className="mono py-2.5 pr-3 text-zinc-300">{candidate.claim_values?.[claim.id] != null ? candidate.claim_values![claim.id].toFixed(2) : "—"}</td>
         <td className="py-2.5"><Pill tone={actionTone(action)}>{action ?? "—"}</Pill><div className="mt-1 text-[10px] text-zinc-500">{detailLabel(candidate.action_details?.[claim.id])}</div></td>

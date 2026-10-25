@@ -6,6 +6,7 @@ tokens) from the raw logits, i.e. the length-normalised sequence probability.
 """
 from __future__ import annotations
 
+import threading
 import time
 from functools import lru_cache
 
@@ -96,6 +97,15 @@ class HFVLMEngine:
         return response.get("probability") if response.get("probability_available") else None
 
 
+_ENGINE_LOCK = threading.Lock()
+
+
 @lru_cache(maxsize=2)
-def load_engine(model_id: str, precision: str = "fp16") -> HFVLMEngine:
+def _cached_engine(model_id: str, precision: str) -> HFVLMEngine:
     return HFVLMEngine(model_id, precision)
+
+
+def load_engine(model_id: str, precision: str = "fp16") -> HFVLMEngine:
+    # lru_cache does not stop two threads from constructing (and loading) the model at once.
+    with _ENGINE_LOCK:
+        return _cached_engine(model_id, precision)

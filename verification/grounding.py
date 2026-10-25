@@ -8,6 +8,7 @@ result rather than a fabricated detection score.
 from __future__ import annotations
 
 import inspect
+import threading
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Protocol
@@ -57,19 +58,27 @@ class GroundingDINO:
         self.device = device
         self._processor = self._model = None
         self._load_error: str | None = None
+        self._lock = threading.Lock()  # API requests run in a thread pool; load the model once
 
     def _load(self) -> bool:
-        if self._processor is not None:
+        if self._model is not None:
             return True
-        if self._load_error:
-            return False
+        with self._lock:
+            if self._model is not None:  # another thread finished loading while we waited
+                return True
+            if self._load_error:
+                return False
+            return self._load_locked()
+
+    def _load_locked(self) -> bool:
         try:
             from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
             from utils import get_device
             self.device = get_device(self.device)
-            self._processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model.to(self.device).eval()
+            processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model.to(self.device).eval()
+            self._processor, self._model = processor, model  # publish only when fully ready
             return True
         except Exception as exc:  # dependency/model access boundary
             self._load_error = f"Grounding DINO unavailable: {type(exc).__name__}: {str(exc)[:180]}"

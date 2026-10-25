@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 from statistics import mean
 
-from core.config import load_config
 from evaluation.chair import chair
 from evaluation.metrics import binary_metrics, classification_metrics
 
@@ -71,10 +70,27 @@ def evaluate(proc_root: str | Path) -> dict:
 
 
 def _meta(root: Path) -> dict:
-    cfg = load_config()
-    sample = next(iter(sorted(root.glob("*/*.jsonl"))), None) if root.exists() else None
-    first = read_jsonl(sample)[0] if sample and sample.stat().st_size else {}
-    return {"model": first.get("model"), "precision": first.get("precision"),
-            "hardware": (first.get("latency_ms") or {}).get("measured_on"),
-            "thresholds": {k: list(v) for k, v in cfg.thresholds.items()}, "weights": cfg.weights,
-            "rerank_threshold": cfg.rerank_threshold, "tuned": (Path("results") / "tuned.yaml").exists()}
+    """Describe the run from the settings recorded in the processed rows themselves,
+    never from the config at report time (it may have changed since processing)."""
+    files = sorted(p for p in root.glob("*/*.jsonl") if not p.name.endswith(".partial.jsonl")) if root.exists() else []
+    first: dict = {}
+    configs: dict[str, list[str]] = {}
+    for path in files:
+        for row in read_jsonl(path):
+            first = first or row
+            key = json.dumps(row.get("config"), sort_keys=True)
+            configs.setdefault(key, [])
+            label = f"{path.parent.name}/{path.stem}"
+            if label not in configs[key]:
+                configs[key].append(label)
+    settings = [json.loads(key) for key in configs]
+    meta = {"model": first.get("model"), "precision": first.get("precision"),
+            "hardware": (first.get("latency_ms") or {}).get("measured_on"), "consistent": len(settings) == 1}
+    if len(settings) == 1 and settings[0]:
+        meta.update(settings[0])
+    elif len(settings) > 1:
+        meta["mixed_settings"] = [{"config": json.loads(key), "files": labels} for key, labels in configs.items()]
+        meta["tuned"] = all((s or {}).get("tuned") for s in settings)
+    else:
+        meta["tuned"] = None  # rows predate provenance recording
+    return meta

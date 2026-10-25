@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import io
+import threading
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
@@ -44,17 +45,25 @@ class CLIPRegionProbe:
         self.model_id, self.local_files_only, self.device = model_id, local_files_only, device
         self._processor = self._model = None
         self._load_error: str | None = None
+        self._lock = threading.Lock()  # API requests run in a thread pool; load the model once
 
     def _load(self) -> bool:
-        if self._processor is not None: return True
-        if self._load_error: return False
+        if self._model is not None: return True
+        with self._lock:
+            if self._model is not None: return True
+            if self._load_error: return False
+            return self._load_locked()
+
+    def _load_locked(self) -> bool:
         try:
             from transformers import CLIPModel, CLIPProcessor
             from utils import get_device
             self.device = get_device(self.device)
-            self._processor = CLIPProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model = CLIPModel.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model.to(self.device).eval(); return True
+            processor = CLIPProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model = CLIPModel.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model.to(self.device).eval()
+            self._processor, self._model = processor, model  # publish only when fully ready
+            return True
         except Exception as exc:
             self._load_error = f"CLIP region probe unavailable: {type(exc).__name__}: {str(exc)[:180]}"; return False
 

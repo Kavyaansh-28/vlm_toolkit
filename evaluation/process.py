@@ -1,5 +1,7 @@
 """Process stage: verify, score, decide and correct generated outputs (resumable).
 
+Every row records the settings it was produced with (``config``), which the report uses.
+
     python -m evaluation.process --gen results/gen/chair.jsonl --ablation full_toolkit
     python -m evaluation.process --gen results/gen/pope_random.jsonl --all-ablations
     python -m evaluation.process --gen ... --all-ablations --cache-only   # laptop: no models, cache only
@@ -88,30 +90,54 @@ def process_chair(record: dict, cfg: PipelineConfig, verify_fn=_verify) -> dict:
             "claim_values": chosen.claim_values, "verification_ms": verification_ms}
 
 
+def _process_record(record: dict, ablation: str, cfg: PipelineConfig, verify_fn, provenance: dict) -> dict:
+    candidates = record["candidates"]
+    used = candidates[:cfg.candidate_count]
+    if record["benchmark"] == "pope":
+        result = process_pope(record, ablation, cfg, verify_fn)
+    else:
+        result = process_chair(record, cfg, verify_fn)
+    latency = {"generation_base": candidates[0].get("latency_ms") or 0,
+               "generation_all": sum(c.get("latency_ms") or 0 for c in used),
+               "verification": result.pop("verification_ms"), "measured_on": record.get("hardware", "local")}
+    latency["total"] = latency["generation_all"] + latency["verification"]
+    keep = {k: record[k] for k in ("sample_id", "benchmark", "split", "image_id", "object", "label", "gt_objects") if k in record}
+    return {**keep, "ablation": ablation, "model": record.get("model"), "precision": record.get("precision"),
+            "base_text": candidates[0]["text"], **result,
+            **({"final_text": candidates[0]["text"]} if record["benchmark"] == "pope" else {}),
+            "latency_ms": latency, "config": provenance}
+
+
 def process_file(gen_path: Path, ablation: str, out_root: Path, base_cfg: PipelineConfig, verify_fn=_verify) -> Path:
+    """Process every generated row; resumable.
+
+    Rows are appended to ``<name>.partial.jsonl`` as they finish and the file
+    replaces the output at the end.  A rerun reuses finished rows (from either
+    file) only when they were produced with the same settings, so an
+    interrupted run continues, while changed thresholds or weights recompute.
+    """
     out = out_root / ablation / gen_path.name
+    partial = out.with_name(out.stem + ".partial.jsonl")
     out.parent.mkdir(parents=True, exist_ok=True)
     cfg = ablation_config(ablation, base_cfg)
+    provenance = cfg.provenance()
+    reusable = {}
+    for path in (out, partial):
+        if path.exists():
+            reusable.update({row["sample_id"]: row for row in latest_rows(path) if row.get("config") == provenance})
     records = latest_rows(gen_path)
-    written = []
-    for record in records:
-        candidates = record["candidates"]
-        used = candidates[:cfg.candidate_count]
-        if record["benchmark"] == "pope":
-            result = process_pope(record, ablation, cfg, verify_fn)
-        else:
-            result = process_chair(record, cfg, verify_fn)
-        latency = {"generation_base": candidates[0].get("latency_ms") or 0,
-                   "generation_all": sum(c.get("latency_ms") or 0 for c in used),
-                   "verification": result.pop("verification_ms"), "measured_on": record.get("hardware", "local")}
-        latency["total"] = latency["generation_all"] + latency["verification"]
-        keep = {k: record[k] for k in ("sample_id", "benchmark", "split", "image_id", "object", "label", "gt_objects") if k in record}
-        written.append({**keep, "ablation": ablation, "model": record.get("model"), "precision": record.get("precision"),
-                        "base_text": candidates[0]["text"], **result,
-                        **({"final_text": candidates[0]["text"]} if record["benchmark"] == "pope" else {}),
-                        "latency_ms": latency})
-    out.write_text("".join(json.dumps(row) + "\n" for row in written), encoding="utf-8")
-    print(f"{ablation:>24}: {len(written)} rows -> {out}", flush=True)
+    reused = 0
+    with partial.open("w", encoding="utf-8") as stream:
+        for record in records:
+            row = reusable.get(record["sample_id"])
+            if row is None:
+                row = _process_record(record, ablation, cfg, verify_fn, provenance)
+            else:
+                reused += 1
+            stream.write(json.dumps(row) + "\n")
+            stream.flush()
+    partial.replace(out)
+    print(f"{ablation:>24}: {len(records)} rows ({reused} reused) -> {out}", flush=True)
     return out
 
 

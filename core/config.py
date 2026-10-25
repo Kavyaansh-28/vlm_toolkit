@@ -38,6 +38,16 @@ class PipelineConfig:
     attribute_verifier: bool = True
     reliability: bool = True
     candidate_count: int = 3
+    temperature: float = .7
+    max_new_tokens: int = 128
+    seed: int = 42
+    tuned_from: str | None = None  # path of the tuned.yaml merged in, if any
+
+    def provenance(self) -> dict:
+        """Settings that determine a processed result; stored with every benchmark row."""
+        return {"thresholds": {k: list(v) for k, v in sorted(self.thresholds.items())}, "global_thresholds": [self.lo, self.hi],
+                "weights": dict(sorted(self.weights.items())), "rerank_threshold": self.rerank_threshold,
+                "grounding_threshold": self.grounding_threshold, "tuned": self.tuned_from is not None}
 
     def bounds(self, claim_type: str) -> tuple[float, float]:
         """(lo, hi) for a claim type; falls back to the global thresholds."""
@@ -49,7 +59,8 @@ class PipelineConfig:
 
 def load_config(path: str | Path | None = None, tuned: str | Path | None = None) -> PipelineConfig:
     config = raw_config(path, tuned)
-    reliability, decision = config.get("reliability", {}), config.get("decision", {})
+    tuned_path = Path(tuned) if tuned else ROOT / "results" / "tuned.yaml"
+    reliability, decision, generation = config.get("reliability", {}), config.get("decision", {}), config.get("generation", {})
     lo, hi = float(decision.get("tau_lo", .30)), float(decision.get("tau_hi", .70))
     thresholds = {kind: (float(value.get("tau_lo", lo)), float(value.get("tau_hi", hi)))
                   for kind, value in (decision.get("per_type") or {}).items()}
@@ -60,5 +71,9 @@ def load_config(path: str | Path | None = None, tuned: str | Path | None = None)
                  "probability": float(reliability.get("lambda_probability", .2)),
                  "agreement": float(reliability.get("lambda_agreement", .2))},
         grounding_threshold=float(config.get("verification", {}).get("grounding_threshold", .30)),
-        candidate_count=int(config.get("generation", {}).get("num_candidates", 3)),
+        candidate_count=int(generation.get("num_candidates", 3)),
+        temperature=float(generation.get("temperature", .7)),
+        max_new_tokens=int(generation.get("max_new_tokens", 128)),
+        seed=int(generation.get("seed", 42)),
+        tuned_from=str(tuned_path) if tuned_path.exists() else None,
     )

@@ -19,6 +19,22 @@ def write_report(result: dict, path: str | Path, configuration: dict, seed: int 
     return payload
 
 
+def _settings_lines(meta: dict) -> list[str]:
+    """Settings recorded in the processed rows; mixed or untuned runs are called out."""
+    if meta.get("mixed_settings"):
+        lines = ["> **Warning:** processed files were produced with different settings; compare rows with care.", ""]
+        for item in meta["mixed_settings"]:
+            c = item["config"] or {}
+            lines.append(f"- {', '.join(item['files'])}: thresholds {c.get('thresholds')} · λ {c.get('weights')} · tuned {c.get('tuned')}")
+        return lines
+    if meta.get("tuned") is None:
+        return ["> **Warning:** processed rows carry no recorded settings; reprocess them to report thresholds."]
+    lines = [f"Claim thresholds (lo, hi): {meta.get('thresholds')} · λ = {meta.get('weights')} · rerank threshold {meta.get('rerank_threshold')}"]
+    if not meta.get("tuned"):
+        lines += ["", "> **Warning:** default thresholds were used (no tuned.yaml when these rows were processed)."]
+    return lines
+
+
 def _pct(value) -> str:
     return "—" if value is None else f"{100 * value:.1f}"
 
@@ -28,7 +44,7 @@ def markdown(payload: dict) -> str:
     lines = ["# Benchmark results", "",
              f"Generated {payload['timestamp'][:19]} UTC · seed {payload['seed']} · model `{meta.get('model')}` "
              f"({meta.get('precision')}) · hardware `{meta.get('hardware')}` · thresholds tuned on held-out split: {meta.get('tuned')}", "",
-             f"Claim thresholds (lo, hi): {meta.get('thresholds')} · λ = {meta.get('weights')} · rerank threshold {meta.get('rerank_threshold')}", "",
+             *_settings_lines(meta), "",
              "> POPE uses 450 COCO images per split (50 of POPE's 500 images are held out for tuning); "
              "the paper's 500-image target refers to the full release. POPE/CHAIR measure object hallucination only; "
              "attribute binding is not measured by these benchmarks.", ""]

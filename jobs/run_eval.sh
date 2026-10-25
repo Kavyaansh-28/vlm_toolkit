@@ -34,6 +34,10 @@ case "$BENCH" in
       --n 3 --max-new-tokens 128 --push-every 50 "${REPO_ARGS[@]}"
     # CHAIR processing waits for tuned thresholds from the POPE process when it runs in parallel.
     for _ in $(seq 1 120); do [ -f results/tuned.yaml ] && break; sleep 30; done
+    if [ ! -f results/tuned.yaml ]; then
+      # Rows record "tuned": false and the report flags it; re-run process once tuned.yaml exists.
+      echo "WARNING: results/tuned.yaml not found after 60 min (did the POPE process fail?); CHAIR uses DEFAULT thresholds" >&2
+    fi
     $PY -m evaluation.process --gen results/gen/chair.jsonl --all-ablations
     push "results/gen/chair*" "results/proc/*/chair*" "results/cache/verification_chair.jsonl"
     ;;
