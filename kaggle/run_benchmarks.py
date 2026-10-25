@@ -39,16 +39,24 @@ subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", "requirement
 subprocess.run([sys.executable, "-m", "evaluation.hub_sync", "pull", "--repo", RESULTS_REPO])
 
 # %% 3. Data and model weights ONCE, before the parallel processes start
-if BENCHES == ["smoke"]:
-    subprocess.run([sys.executable, "-m", "evaluation.prepare_data", "--out", "data/smoke", "--only", "smoke"], check=True)
+# Data follows BENCHES automatically: do not edit this cell.
+SMOKE = "smoke" in BENCHES
+DATA_DIR = "data/smoke" if SMOKE else "data/benchmarks"
+if SMOKE:
+    subprocess.run([sys.executable, "-m", "evaluation.prepare_data", "--out", DATA_DIR, "--only", "smoke"], check=True)
 else:
-    subprocess.run([sys.executable, "-m", "evaluation.prepare_data", "--out", "data/benchmarks", "--pope-images", "450",
+    subprocess.run([sys.executable, "-m", "evaluation.prepare_data", "--out", DATA_DIR, "--pope-images", "450",
                     "--chair-images", "500", "--tune-images", "50", "--seed", "42"], check=True)
 from huggingface_hub import snapshot_download
 for model in ["llava-hf/llava-1.5-7b-hf", "IDEA-Research/grounding-dino-tiny", "openai/clip-vit-base-patch32"]:
     snapshot_download(model)
 
 # %% 4. POPE on GPU 0 and CHAIR on GPU 1, in parallel
+# Fail fast if cell 3 did not prepare the inputs the benchmarks read.
+needed = {"pope": ["pope_tune", "pope_random", "pope_popular", "pope_adversarial"], "chair": ["chair"],
+          "smoke": ["pope_random", "pope_tune", "chair"]}
+missing = [f"{DATA_DIR}/{n}.jsonl" for b in BENCHES for n in needed[b] if not os.path.exists(f"{DATA_DIR}/{n}.jsonl")]
+assert not missing, f"missing benchmark inputs {missing}: re-run cell 3"
 procs = []
 for gpu, bench in enumerate(BENCHES):
     log = open(f"/kaggle/working/{bench}.log", "w")
