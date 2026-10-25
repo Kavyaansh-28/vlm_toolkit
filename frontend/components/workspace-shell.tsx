@@ -3,20 +3,20 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { motion } from "motion/react";
 import dynamic from "next/dynamic";
-import { Activity, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardCheck, Clock3, Database, Download, FileImage, ImagePlus, Layers3, LoaderCircle, ScanEye, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { Activity, ArrowRight, ChevronDown, CircleHelp, Clock3, Database, Download, FileImage, ImagePlus, Layers3, LoaderCircle, ScanEye, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
 import { Button, EmptyState, Eyebrow, PageHeading, Panel, Pill } from "@/components/ui";
-import { analyzeImage, getBenchmarks, getConfig, getHistory, getHistoryItem, getReview, postReview } from "@/lib/api";
+import { analyzeImage, getBenchmarks, getConfig, getHistory, getHistoryItem } from "@/lib/api";
 import { useWorkspace } from "@/lib/store";
-import type { Candidate, Claim, Evidence, HistorySummary, ReviewItem } from "@/lib/types";
+import type { Candidate, Claim, Evidence, HistorySummary } from "@/lib/types";
 import { ClaimGraph } from "@/components/claim-graph";
 
 const formSchema = z.object({
@@ -34,9 +34,8 @@ const titles: Record<string, [string, string, string]> = {
   claims: ["02 / Claims", "A response, decomposed.", "Inspect typed claims and the graph structure extracted by the current backend."],
   evidence: ["03 / Evidence", "Trace the visual support.", "Review Grounding DINO regions, crop-level attribute evidence, contradictions, and uncertainty."],
   candidates: ["04 / Candidates", "Compare what the model said.", "Rank the actual candidates returned by this run; no synthetic comparison scores."],
-  review: ["05 / Review", "Flagged claims, for people.", "Claims between the thresholds are escalated here for quick human annotation."],
-  evaluation: ["06 / Evaluation", "Benchmarks, as measured.", "POPE and CHAIR results appear only after a benchmark run has been processed."],
-  experiments: ["07 / Experiments", "Every run, traceable.", "Browse and reopen records saved by the existing SQLite experiment history."],
+  evaluation: ["05 / Evaluation", "Benchmarks, as measured.", "POPE and CHAIR results appear only after a benchmark run has been processed."],
+  experiments: ["06 / Experiments", "Every run, traceable.", "Browse and reopen records saved by the existing SQLite experiment history."],
 };
 
 function actionTone(action?: string): "good" | "warn" | "bad" | "neutral" | "violet" {
@@ -54,7 +53,7 @@ function claimLabel(claim: Claim) {
 }
 
 function detailLabel(detail?: string) {
-  if (!detail || detail === "flag") return detail === "flag" ? "flagged for review" : "";
+  if (!detail || detail === "flag") return detail === "flag" ? "flagged as uncertain" : "";
   if (detail === "delete") return "delete (no evidence)";
   const [kind, rest] = detail.split(":");
   if (kind === "replace") return `replace ${rest.replace("->", " → ")}`;
@@ -106,7 +105,7 @@ function DecisionPanel({ candidate }: { candidate: Candidate }) {
   const Icon = candidate.decision === "ACCEPT" || candidate.decision === "RERANK" ? ShieldCheck : candidate.decision === "ABSTAIN" ? CircleHelp : ShieldAlert;
   const copy: Record<string, string> = {
     ACCEPT: "All claims met the accept threshold.", RERANK: "The top candidate was below the reliability threshold; a reliable alternative was selected.",
-    CORRECT: "Visual evidence supported evidence-backed corrections; verified content was left untouched.", ABSTAIN: "Some claims fall between thresholds or no candidate is reliable; flagged for human review.",
+    CORRECT: "Visual evidence supported evidence-backed corrections; verified content was left untouched.", ABSTAIN: "Some claims fall between thresholds or no candidate is reliable; flagged as uncertain rather than corrected.",
   };
   return <div className="flex gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><span className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-white/[.035]"><Icon size={16} className={candidate.decision === "ACCEPT" || candidate.decision === "RERANK" ? "text-emerald-200" : candidate.decision === "ABSTAIN" ? "text-amber-100" : "text-violet-200"}/></span><div><div className="flex items-center gap-2"><Eyebrow>Decision</Eyebrow><Pill tone={statusTone(candidate.decision)}>{candidate.decision}</Pill></div><p className="mt-2 text-xs leading-5 text-zinc-500">{candidate.decision_reason || copy[candidate.decision] || "Decision returned by the policy."}</p></div></div>;
 }
@@ -300,26 +299,6 @@ function EvaluationPage() {
     </div>}</>;
 }
 
-function ReviewPage() {
-  const client = useQueryClient();
-  const query = useQuery({ queryKey: ["review"], queryFn: getReview });
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const mutation = useMutation({ mutationFn: postReview, onSuccess: () => { client.invalidateQueries({ queryKey: ["review"] }); toast.success("Label saved"); }, onError: (error) => toast.error("Could not save label", { description: (error as Error).message }) });
-  const items = [...(query.data ?? [])].sort((a, b) => Number(Boolean(a.label)) - Number(Boolean(b.label)));
-  const pending = items.filter((item) => !item.label).length;
-  const label = (item: ReviewItem, value: "correct" | "incorrect" | "unsure") => mutation.mutate({ experiment_id: item.experiment_id, claim_id: item.claim_id, label: value, note: notes[`${item.experiment_id}:${item.claim_id}`] ?? item.note ?? "" });
-  return <><PageHeading eyebrow="Human review / flagged claims" title="Flagged claims, for people." detail="Claims with lo < v < hi, or without usable evidence, are escalated here. Labels are stored with the run for provenance and future calibration." right={<Pill tone={pending ? "warn" : "good"}>{pending} awaiting review</Pill>}/>
-    {query.isPending ? <Panel className="animate-pulse p-7"><div className="h-4 w-48 rounded bg-white/[.05]"/></Panel> : query.isError ? <EmptyState icon={<ClipboardCheck size={18}/>} title="Review service unavailable" detail={(query.error as Error).message}/> : !items.length ? <EmptyState icon={<ClipboardCheck size={18}/>} title="Nothing to review" detail="Flagged claims from analyses appear here."/> :
-    <div className="grid gap-3 lg:grid-cols-2">{items.map((item) => { const key = `${item.experiment_id}:${item.claim_id}`;
-      return <Panel key={key} className="p-4"><div className="flex gap-3">{item.region_crop ? <img src={item.region_crop} alt={`Region for ${item.claim_text}`} className="size-16 shrink-0 rounded-lg object-cover"/> : <div className="grid size-16 shrink-0 place-items-center rounded-lg border border-dashed border-white/10 text-[9px] text-zinc-500">no crop</div>}
-        <div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-2"><div><div className="text-sm font-medium text-zinc-100">{item.claim_text}</div><div className="mono mt-0.5 text-[9px] text-zinc-600">RUN {String(item.experiment_id).padStart(4, "0")} · {item.claim_id} · v={item.v != null ? item.v.toFixed(2) : "n/a"}{item.status ? ` · verifier ${item.status.toLowerCase()}` : ""}</div></div>{item.label ? <Pill tone={item.label === "correct" ? "good" : item.label === "incorrect" ? "bad" : "warn"}>labelled {item.label}</Pill> : <Pill tone="warn">flagged</Pill>}</div>
-          {item.sentence && <p className="mt-2 text-[11px] italic leading-5 text-zinc-500">“{plainText(item.sentence)}”</p>}
-          <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.explanation}</p>
-          <input value={notes[key] ?? item.note ?? ""} onChange={(event) => setNotes({ ...notes, [key]: event.target.value })} placeholder="Optional note" className="mt-3 w-full rounded-lg border border-white/[.09] bg-black/20 px-2.5 py-1.5 text-[11px] text-zinc-300 placeholder:text-zinc-600 focus:outline-none"/>
-          <div className="mt-2 flex gap-2"><Button type="button" variant="secondary" className="px-3 py-1.5 text-xs" onClick={() => label(item, "correct")} disabled={mutation.isPending}><Check size={13}/> Claim is true</Button><Button type="button" variant="secondary" className="px-3 py-1.5 text-xs" onClick={() => label(item, "incorrect")} disabled={mutation.isPending}><X size={13}/> Claim is false</Button><Button type="button" variant="ghost" className="px-3 py-1.5 text-xs" onClick={() => label(item, "unsure")} disabled={mutation.isPending}><CircleHelp size={13}/> Unsure</Button></div>
-        </div></div></Panel>; })}</div>}</>;
-}
-
 function ExperimentsPage() {
   const list = useQuery({ queryKey: ["history"], queryFn: getHistory });
   const [active, setActive] = useState<number | null>(null);
@@ -330,7 +309,7 @@ function ExperimentsPage() {
 
 export function WorkspaceShell({ section }: { section: string }) {
   const [eyebrow,title,detail] = titles[section];
-  const pages: Record<string, () => React.ReactNode> = { analyze: AnalysisWorkspace, claims: ClaimsPage, evidence: EvidencePage, candidates: CandidatesPage, review: ReviewPage, evaluation: EvaluationPage, experiments: ExperimentsPage };
+  const pages: Record<string, () => React.ReactNode> = { analyze: AnalysisWorkspace, claims: ClaimsPage, evidence: EvidencePage, candidates: CandidatesPage, evaluation: EvaluationPage, experiments: ExperimentsPage };
   const Page = pages[section];
   return <main className="min-h-screen bg-[#0b0c0f]"><SiteHeader/><div className="mx-auto max-w-[1480px] px-4 pb-20 pt-28 sm:px-7 lg:px-10"><nav aria-label="Workspace sections" className="mb-6 flex gap-1 overflow-x-auto border-b border-white/[.06] pb-3 hide-scrollbar xl:hidden">{Object.entries(titles).map(([key,[label]]) => <Link key={key} href={`/${key}`} aria-current={section === key ? "page" : undefined} className={`whitespace-nowrap rounded-lg px-3 py-2 text-[11px] transition ${section === key ? "bg-white/[.07] text-zinc-100" : "text-zinc-500 hover:text-zinc-200"}`}>{label.split(" / ")[1]}</Link>)}</nav><Page/></div><footer className="border-t border-white/[.05] px-4 py-5 text-center"><span className="mono text-[9px] uppercase tracking-[.15em] text-zinc-600">Local-first · evidence-linked · uncertainty-aware</span></footer></main>;
 }
