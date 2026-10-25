@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 ClaimType = Literal["object", "attribute", "relation", "quantity"]
+ClaimAction = Literal["ACCEPT", "CORRECT", "ABSTAIN"]
 
 @dataclass
 class Claim:
@@ -13,10 +14,14 @@ class Claim:
     value: str | int | None = None
     attribute: str | None = None
     object: str | None = None
+    # Sentence span of the response the claim was extracted from.
     text: str = ""
     # Optional instance selector; None means class-level and must stay uncertain
     # when several instances cannot be disambiguated from the language.
     instance_id: str | None = None
+    # Word(s) used in the response for the subject ("woman" for class "person"),
+    # so corrections edit the phrase the model actually wrote.
+    surface: str | None = None
 
 @dataclass
 class Evidence:
@@ -57,6 +62,15 @@ class Candidate:
     latency_ms: int | None = None
     generation_strategy: str = ""
     stage_latency_ms: dict[str, int] = field(default_factory=dict)
+    # Eq. 3 bookkeeping: A_j is undefined when n == 1 and its weight is redistributed.
+    agreement_available: bool = False
+    num_tokens: int | None = None
+    # Per-claim decision policy (paper Sec. IV-E) and what the correction did.
+    claim_actions: dict[str, str] = field(default_factory=dict)
+    claim_values: dict[str, float] = field(default_factory=dict)
+    action_details: dict[str, str] = field(default_factory=dict)
+    selected: bool = False
+    decision_reason: str = ""
 
     def export(self) -> dict[str, Any]:
         return {**asdict(self), "original_response": self.text,

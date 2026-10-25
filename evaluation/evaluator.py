@@ -1,71 +1,96 @@
-"""Dataset-agnostic, runnable evaluation harnesses.
+"""Benchmark scoring over processed rows (results/proc/<ablation>/<file>.jsonl).
 
-Adapters consume prepared JSONL records rather than downloading benchmark data
-silently. They report only labels provided by the dataset/run and never embed
-paper targets as results.
+Reports only what the runs produced; nothing here embeds a paper target as a result.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable
+from statistics import mean
 
-from evaluation.metrics import classification_metrics
+from evaluation.chair import chair
+from evaluation.metrics import binary_metrics, classification_metrics
+
+SPLITS = ("random", "popular", "adversarial")
 
 
 def read_jsonl(path: str | Path) -> list[dict]:
-    with Path(path).open() as stream:
+    with Path(path).open(encoding="utf-8") as stream:
         return [json.loads(line) for line in stream if line.strip()]
 
 
-def pope(records: list[dict]) -> dict:
-    """POPE accuracy/precision/recall/F1/yes-ratio by random/popular/adversarial split.
-
-    Each record needs ``split``, boolean ``label`` and boolean ``prediction``.
-    """
-    out = {"benchmark": "POPE", "status": "EVALUATED" if records else "NOT RUN", "splits": {}}
-    for split in ("random", "popular", "adversarial"):
-        rows = [r for r in records if r.get("split") == split]
-        if not rows:
-            out["splits"][split] = {"status": "NOT RUN", "sample_count": 0}; continue
-        labels, predictions = [bool(r["label"]) for r in rows], [bool(r["prediction"]) for r in rows]
-        result = classification_metrics([{"expected_reliable": a, "reliability": float(b)} for a,b in zip(labels,predictions)])
-        result["yes_ratio"] = sum(predictions) / len(predictions); result["status"] = "EVALUATED"
-        out["splits"][split] = result
-    return out
+def pope(rows: list[dict]) -> dict:
+    """Accuracy / precision / recall / F1 / yes-ratio (positive class = yes) + abstention rate."""
+    if not rows:
+        return {"status": "NOT RUN", "sample_count": 0}
+    labels = [bool(r["label"]) for r in rows]
+    answers = [bool(r["pope"]["final_answer"]) for r in rows]
+    result = binary_metrics(labels, answers)
+    result.update(status="EVALUATED", sample_count=len(rows), yes_ratio=sum(answers) / len(answers),
+                  abstention_rate=sum(bool(r["pope"].get("abstained")) for r in rows) / len(rows),
+                  corrected_yes_to_no=sum(r["pope"]["base_answer"] and not r["pope"]["final_answer"] for r in rows))
+    return result
 
 
-def chair(records: list[dict]) -> dict:
-    """CHAIR from caption object sets: ground_truth_objects, mentioned_objects."""
-    if not records: return {"benchmark": "CHAIR", "status": "NOT RUN"}
-    sentences = instances = hallucinated = mentioned = truth = matched = 0
-    for row in records:
-        gt, pred = set(row.get("ground_truth_objects", [])), set(row.get("mentioned_objects", []))
-        bad = pred - gt; sentences += 1; instances += bool(bad); hallucinated += len(bad); mentioned += len(pred); truth += len(gt); matched += len(pred & gt)
-    return {"benchmark": "CHAIR", "status": "EVALUATED", "sample_count": sentences,
-            "CHAIR_S": instances / sentences if sentences else 0, "CHAIR_I": hallucinated / mentioned if mentioned else 0,
-            "object_recall": matched / truth if truth else 0}
+def latency(rows: list[dict]) -> dict:
+    timed = [r["latency_ms"] for r in rows if r.get("latency_ms", {}).get("generation_base")]
+    if not timed:
+        return {"available": False}
+    base, total = mean(t["generation_base"] for t in timed), mean(t["total"] for t in timed)
+    return {"available": True, "mean_base_ms": round(base), "mean_total_ms": round(total),
+            "ratio": round(total / base, 2) if base else None, "measured_on": timed[0].get("measured_on", "unknown")}
 
 
-def winoground(records: list[dict]) -> dict:
-    """Winoground labels need text_correct and image_correct per group."""
-    if not records: return {"benchmark": "Winoground", "status": "NOT RUN"}
-    text = sum(bool(r.get("text_correct")) for r in records) / len(records)
-    image = sum(bool(r.get("image_correct")) for r in records) / len(records)
-    group = sum(bool(r.get("text_correct")) and bool(r.get("image_correct")) for r in records) / len(records)
-    return {"benchmark": "Winoground", "status": "EVALUATED", "sample_count": len(records), "text_score": text, "image_score": image, "group_score": group}
+def pope_calibration(rows: list[dict]) -> dict:
+    """ECE/Brier of R_j against 'final answer correct' on asserted (yes) claims."""
+    records = [{"expected_reliable": bool(r["pope"]["final_answer"]) == bool(r["label"]), "reliability": r["pope"]["reliability"]}
+               for r in rows if r["pope"].get("reliability") is not None]
+    return classification_metrics(records)
 
 
-def sugarcrepe(records: list[dict]) -> dict:
-    if not records: return {"benchmark": "SugarCrepe", "status": "NOT RUN"}
-    categories = {}
-    for category in ("replace", "swap", "add"):
-        rows = [r for r in records if r.get("category") == category]
-        categories[category] = {"status": "EVALUATED", "accuracy": sum(bool(x.get("correct")) for x in rows)/len(rows), "sample_count": len(rows)} if rows else {"status":"NOT RUN", "sample_count":0}
-    return {"benchmark": "SugarCrepe", "status": "EVALUATED", "categories": categories}
+def evaluate(proc_root: str | Path) -> dict:
+    root = Path(proc_root)
+    report: dict = {"pope": {}, "chair": {}, "latency": {}, "calibration": {}}
+    for ablation_dir in sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []:
+        name = ablation_dir.name
+        for split in SPLITS:
+            path = ablation_dir / f"pope_{split}.jsonl"
+            if path.exists():
+                rows = read_jsonl(path)
+                report["pope"].setdefault(name, {})[split] = pope(rows)
+                if name == "full_toolkit":
+                    report["calibration"][f"pope_{split}"] = pope_calibration(rows)
+        chair_path = ablation_dir / "chair.jsonl"
+        if chair_path.exists():
+            rows = read_jsonl(chair_path)
+            report["chair"][name] = chair(rows)
+            report["latency"][name] = latency(rows)
+    report["meta"] = _meta(root)
+    return report
 
 
-def run_all(dataset_dir: str | Path) -> dict:
-    root = Path(dataset_dir)
-    loaders = {"pope": pope, "chair": chair, "winoground": winoground, "sugarcrepe": sugarcrepe}
-    return {name: handler(read_jsonl(root / f"{name}.jsonl")) if (root / f"{name}.jsonl").exists() else handler([]) for name, handler in loaders.items()}
+def _meta(root: Path) -> dict:
+    """Describe the run from the settings recorded in the processed rows themselves,
+    never from the config at report time (it may have changed since processing)."""
+    files = sorted(p for p in root.glob("*/*.jsonl") if not p.name.endswith(".partial.jsonl")) if root.exists() else []
+    first: dict = {}
+    configs: dict[str, list[str]] = {}
+    for path in files:
+        for row in read_jsonl(path):
+            first = first or row
+            key = json.dumps(row.get("config"), sort_keys=True)
+            configs.setdefault(key, [])
+            label = f"{path.parent.name}/{path.stem}"
+            if label not in configs[key]:
+                configs[key].append(label)
+    settings = [json.loads(key) for key in configs]
+    meta = {"model": first.get("model"), "precision": first.get("precision"),
+            "hardware": (first.get("latency_ms") or {}).get("measured_on"), "consistent": len(settings) == 1}
+    if len(settings) == 1 and settings[0]:
+        meta.update(settings[0])
+    elif len(settings) > 1:
+        meta["mixed_settings"] = [{"config": json.loads(key), "files": labels} for key, labels in configs.items()]
+        meta["tuned"] = all((s or {}).get("tuned") for s in settings)
+    else:
+        meta["tuned"] = None  # rows predate provenance recording
+    return meta

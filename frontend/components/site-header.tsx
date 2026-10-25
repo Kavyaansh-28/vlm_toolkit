@@ -8,7 +8,7 @@ import { Activity, ArrowUpRight, Menu, X } from "lucide-react";
 
 const links = [
   ["Analyze", "/analyze"], ["Claims", "/claims"], ["Evidence", "/evidence"],
-  ["Candidates", "/candidates"], ["Evaluation", "/evaluation"], ["Experiments", "/experiments"],
+  ["Candidates", "/candidates"], ["Review", "/review"], ["Evaluation", "/evaluation"], ["Experiments", "/experiments"],
 ] as const;
 
 export function SiteHeader() {

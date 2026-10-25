@@ -1,7 +1,12 @@
-"""Claim and candidate reliability with unavailable-probability redistribution."""
+"""Candidate reliability, paper Eq. 3: R_j = l1*mean_i(v_i) + l2*p_j + l3*A_j.
+
+Terms that are genuinely unavailable (no token probabilities from an API model,
+no agreement when n == 1, no usable verifier) are never fabricated; their
+weight is redistributed to the remaining terms and the record says so.
+"""
 from __future__ import annotations
 
-from collections import Counter
+from core.config import PipelineConfig
 from core.schemas import Candidate
 
 
@@ -10,60 +15,35 @@ def _key(c):
 
 
 def agreement(candidates: list[Candidate]) -> None:
-    total = max(1, len(candidates))
-    counts = Counter(_key(c) for candidate in candidates for c in candidate.claims)
-    for candidate in candidates:
-        candidate.agreement = round(sum(counts[_key(c)] / total for c in candidate.claims) / len(candidate.claims), 2) if candidate.claims else 0.0
+    """A_j = fraction of y_j's claims also asserted by at least one of the other n-1 candidates."""
+    keys = [{_key(c) for c in candidate.claims} for candidate in candidates]
+    for index, candidate in enumerate(candidates):
+        others = [k for j, k in enumerate(keys) if j != index]
+        candidate.agreement_available = bool(others and keys[index])
+        candidate.agreement = (round(sum(any(k in other for other in others) for k in keys[index]) / len(keys[index]), 3)
+                               if candidate.agreement_available else 0.0)
 
 
-def score(candidate: Candidate, weights: dict[str, float], high=.80, low=.40) -> None:
-    evidence_by_id = {e.claim_id: e for e in candidate.evidence}
-    candidate.claim_reliability = {}
-    for claim in candidate.claims:
-        evidence = evidence_by_id.get(claim.id)
-        # Status and evidence quality matter separately: an unavailable verifier
-        # cannot contribute a neutral-looking fabricated confidence.
-        if evidence is None or evidence.status == "AMBIGUOUS":
-            value = .5
-        elif evidence.status == "SUPPORTED":
-            value = evidence.score
-        elif evidence.status in {"CONTRADICTED", "UNSUPPORTED"}:
-            value = evidence.score
-        else:  # legacy status compatibility
-            value = evidence.score
-        candidate.claim_reliability[claim.id] = round(value, 3)
+def verification_values(candidate: Candidate) -> dict[str, float]:
+    """v_i per claim whose verifier actually ran (evidence_quality > 0)."""
+    claim_ids = {c.id for c in candidate.claims}
+    return {e.claim_id: max(0.0, min(1.0, float(e.score))) for e in candidate.evidence
+            if e.claim_id in claim_ids and e.evidence_quality and e.status != "AMBIGUOUS"}
 
-    known = [(e.score, e.evidence_quality if e.evidence_quality is not None else 1.0)
-             for e in candidate.evidence if e.status != "AMBIGUOUS"]
-    verification = (sum(score * quality for score, quality in known) / sum(q for _, q in known)
-                    if known and sum(q for _, q in known) else .5)
-    # Provider token probabilities are genuinely absent unless an adapter supplies
-    # them. Redistribute their configured mass to visual verification.
-    wp = weights.get("probability", 0.0) if candidate.probability_available and candidate.probability is not None else 0.0
-    wv = max(0.0, weights.get("verification", 0.0)) + max(0.0, weights.get("probability", 0.0) - wp)
-    wa = max(0.0, weights.get("agreement", 0.0))
-    denom = wv + wp + wa
-    if denom <= 0:
-        wv, wa, denom = 1.0, 0.0, 1.0
-    visual_score = (verification * wv + (candidate.probability or 0.0) * wp + candidate.agreement * wa) / denom
-    candidate.reliability = round(max(0.0, min(1.0, visual_score)), 2)
 
-    statuses = {e.status for e in candidate.evidence}
-    # A detector-backed missing object is a conservative deletion case under
-    # the paper's policy.  Other UNSUPPORTED/AMBIGUOUS claims still abstain.
-    actionable = any(
-        (e.status == "CONTRADICTED" and e.evidence_quality and e.evidence_quality >= .8 and
-         e.diagnosis in {"OBJECT_HALLUCINATION", "ATTRIBUTE_BINDING_ERROR", "ATTRIBUTE_ERROR", "QUANTITY_ERROR"}) or
-        (e.status == "UNSUPPORTED" and e.evidence_quality and e.evidence_quality >= .8 and e.score <= low and
-         e.diagnosis == "UNSUPPORTED_CLAIM")
-        for e in candidate.evidence)
-    if actionable:
-        candidate.decision = "CORRECT"
-    elif "AMBIGUOUS" in statuses or "UNSUPPORTED" in statuses:
-        candidate.decision = "ABSTAIN"
-    elif candidate.reliability >= high and "CONTRADICTED" not in statuses:
-        candidate.decision = "ACCEPT"
-    elif candidate.reliability <= low and not candidate.evidence:
-        candidate.decision = "ABSTAIN"
-    else:
-        candidate.decision = "ABSTAIN"
+def score(candidate: Candidate, cfg: PipelineConfig | dict) -> None:
+    weights = cfg.weights if isinstance(cfg, PipelineConfig) else cfg
+    values = verification_values(candidate)
+    candidate.claim_values = {k: round(v, 3) for k, v in values.items()}
+    candidate.claim_reliability = dict(candidate.claim_values)
+    terms = {
+        "verification": (sum(values.values()) / len(values)) if values else None,
+        "probability": candidate.probability if candidate.probability_available and candidate.probability is not None else None,
+        "agreement": candidate.agreement if candidate.agreement_available else None,
+    }
+    active = {name: max(0.0, float(weights.get(name, 0.0))) for name, value in terms.items() if value is not None}
+    total = sum(active.values())
+    if not active or total <= 0:
+        candidate.reliability = 0.0
+        return
+    candidate.reliability = round(max(0.0, min(1.0, sum(terms[name] * w for name, w in active.items()) / total)), 3)

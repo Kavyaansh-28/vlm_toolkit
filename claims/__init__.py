@@ -1,16 +1,15 @@
-"""Claim vocabulary and backward-compatible simple extractor."""
+"""Claim vocabulary and a small dict-based view of the extractor."""
 from __future__ import annotations
-COLORS = ("red","blue","green","yellow","black","white","orange","brown","gray","grey","purple","pink")
-COMMON_OBJECTS = ("person","man","woman","child","dog","cat","car","bicycle","bike","motorcycle","bus","truck","boat","bird","horse","bench","chair","table","phone","laptop","bottle","cup","backpack","umbrella","surfboard","shirt","jeans","pants","hat")
-ALIASES={"bike":"bicycle","automobile":"car","grey":"gray","man":"person","woman":"person","child":"person"}
+
+from claims.vocab import COLORS, MATERIALS, to_class
+
+
 def normalize_object(value: str) -> str:
-    value = value.strip().lower()
-    # Do not turn the singular class ``jeans`` into ``jean`` (or ``bus`` into
-    # ``bu``); only singularize forms that map to a known vocabulary entry.
-    if value not in COMMON_OBJECTS:
-        singular = next((item for item in COMMON_OBJECTS if value == item + "s"), value)
-        value = singular
-    return ALIASES.get(value, value)
+    """Canonical class for a phrase ("men" -> "person"); unknown words unchanged."""
+    return to_class(value) or value.strip().lower()
+
+
 def extract_claims(text: str) -> list[dict]:
     from .extractor import extract
-    return [{"object":c.subject,"attribute":c.attribute,"value":c.value} for c in extract(text) if c.type in {"object","attribute"}]
+    return [{"object": c.subject, "attribute": c.attribute, "value": c.value}
+            for c in extract(text) if c.type in {"object", "attribute"}]

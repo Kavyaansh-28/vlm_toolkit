@@ -1,7 +1,8 @@
-"""Model-agnostic adapters for generation and independent visual verification."""
+"""Model-agnostic adapters for API-hosted generator VLMs."""
 from __future__ import annotations
 
 import base64
+import math
 import mimetypes
 import os
 from abc import ABC, abstractmethod
@@ -14,11 +15,15 @@ load_dotenv()
 
 DEFAULTS = {
     "openai": "gpt-4.1-mini",
-    "groq": "qwen/qwen3.8-27b",
-    "gemini": "gemini-3.8-flash",
+    "groq": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "gemini": "gemini-2.5-flash",
     "llama": "meta-llama/llama-4-scout",
+    "hf-router": "Qwen/Qwen2.5-VL-7B-Instruct",
 }
-KEYS = {"openai": "OPENAI_API_KEY", "groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY", "llama": "LLAMA_API_KEY"}
+KEYS = {"openai": "OPENAI_API_KEY", "groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY",
+        "llama": "LLAMA_API_KEY", "hf-router": "HF_TOKEN"}
+LOCAL_PROVIDERS = ("hf-local",)
+ENV_PREFIX = {"hf-router": "HF_ROUTER"}
 
 
 def _configured_secret(value: str | None) -> bool:
@@ -26,44 +31,61 @@ def _configured_secret(value: str | None) -> bool:
     return bool(value and value.strip() and "your_" not in value.lower() and "api_key_here" not in value.lower())
 
 
+def _model_env(name: str) -> str:
+    return f"{ENV_PREFIX.get(name, name.upper())}_MODEL"
+
+
 class VLMProvider(ABC):
-    """Common image+prompt interface used by both generator and verifier roles."""
+    """Common image+prompt interface for generator adapters."""
 
     name: str
 
     @abstractmethod
-    def generate(self, image_path: str, prompt: str) -> dict[str, Any]:
+    def generate(self, image_path: str, prompt: str, temperature: float | None = None) -> dict[str, Any]:
         """Return text, configured model/provider, and an optional error."""
 
 
-class OpenAICompatibleProvider(VLMProvider):
-    def __init__(self, name: str, model: str, api_key: str, base_url: str | None = None):
-        self.name, self.model, self.api_key, self.base_url = name, model, api_key, base_url
+def _image_payload(image_path: str) -> tuple[str | None, bytes]:
+    path = Path(image_path)
+    mime = mimetypes.guess_type(path.name)[0]
+    return (mime if mime in {"image/jpeg", "image/png", "image/webp", "image/gif"} else None), path.read_bytes()
 
-    def generate(self, image_path: str, prompt: str) -> dict[str, Any]:
+
+class OpenAICompatibleProvider(VLMProvider):
+    def __init__(self, name: str, model: str, api_key: str, base_url: str | None = None, logprobs: bool = False):
+        self.name, self.model, self.api_key, self.base_url, self.logprobs = name, model, api_key, base_url, logprobs
+
+    def generate(self, image_path: str, prompt: str, temperature: float | None = None) -> dict[str, Any]:
         try:
             from openai import OpenAI
 
-            path = Path(image_path)
-            mime = mimetypes.guess_type(path.name)[0]
-            if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            mime, data = _image_payload(image_path)
+            if not mime:
                 return {"response": "", "model": self.model, "provider": self.name,
                         "error": "Unsupported image type. Upload PNG, JPG, WEBP, or GIF."}
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            encoded = base64.b64encode(data).decode("ascii")
             client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=90.0, max_retries=1)
+            options: dict[str, Any] = {"max_tokens": 900}
+            if temperature is not None: options["temperature"] = temperature
+            if self.logprobs: options["logprobs"] = True
             completion = client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": [
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}},
                 ]}],
-                max_tokens=900,
+                **options,
             )
-            return {"response": completion.choices[0].message.content or "", "model": self.model,
-                    "provider": self.name, "probability": None, "probability_available": False}
+            choice = completion.choices[0]
+            # Native confidence when the API exposes token log-probs: exp(mean log p).
+            tokens = getattr(getattr(choice, "logprobs", None), "content", None) or []
+            probability = math.exp(sum(t.logprob for t in tokens) / len(tokens)) if tokens else None
+            return {"response": choice.message.content or "", "model": self.model, "provider": self.name,
+                    "probability": probability, "probability_available": probability is not None,
+                    "num_tokens": len(tokens) or None}
         except ImportError:
             return {"response": "", "model": self.model, "provider": self.name,
-                    "error": "The openai package is not installed. Run: python3 -m pip install openai"}
+                    "error": "The openai package is not installed. Run: python -m pip install openai"}
         except Exception as exc:
             return {"response": "", "model": self.model, "provider": self.name,
                     "error": f"{self.name.title()} vision request failed: {str(exc)[:240]}"}
@@ -73,42 +95,32 @@ class GeminiProvider(VLMProvider):
     def __init__(self, model: str, api_key: str):
         self.name, self.model, self.api_key = "gemini", model, api_key
 
-    def generate(self, image_path: str, prompt: str) -> dict[str, Any]:
+    def generate(self, image_path: str, prompt: str, temperature: float | None = None) -> dict[str, Any]:
         try:
             from google import genai
+            from google.genai import types
 
-            path = Path(image_path)
-            mime = mimetypes.guess_type(path.name)[0]
-            if mime not in {"image/jpeg", "image/png", "image/webp", "image/gif"}:
+            mime, data = _image_payload(image_path)
+            if not mime:
                 return {"response": "", "model": self.model, "provider": self.name,
                         "error": "Unsupported image type. Upload PNG, JPG, WEBP, or GIF."}
-            data = path.read_bytes()
             client = genai.Client(api_key=self.api_key, http_options={"timeout": 600000})
-            if hasattr(client, "interactions"):
-                response = client.interactions.create(
-                    model=self.model,
-                    input=[{"type": "text", "text": prompt},
-                           {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime}],
-                )
-                text = response.output_text
-            else:
-                from google.genai import types
-                response = client.models.generate_content(
-                    model=self.model, contents=[prompt, types.Part.from_bytes(data=data, mime_type=mime)],
-                )
-                text = response.text
-            return {"response": text or "", "model": self.model, "provider": self.name,
+            config = types.GenerateContentConfig(temperature=temperature) if temperature is not None else None
+            response = client.models.generate_content(
+                model=self.model, contents=[prompt, types.Part.from_bytes(data=data, mime_type=mime)], config=config,
+            )
+            return {"response": response.text or "", "model": self.model, "provider": self.name,
                     "probability": None, "probability_available": False}
         except ImportError:
             return {"response": "", "model": self.model, "provider": self.name,
-                    "error": "The google-genai package is not installed. Run: python3 -m pip install google-genai"}
+                    "error": "The google-genai package is not installed. Run: python -m pip install google-genai"}
         except Exception as exc:
             return {"response": "", "model": self.model, "provider": self.name,
                     "error": f"Gemini vision request failed: {str(exc)[:240]}"}
 
 
 def providers() -> list[str]:
-    return list(DEFAULTS)
+    return list(DEFAULTS) + list(LOCAL_PROVIDERS)
 
 
 def provider_models() -> list[dict[str, str]]:
@@ -116,8 +128,13 @@ def provider_models() -> list[dict[str, str]]:
 
     API keys are deliberately never included in this payload.
     """
-    return [{"id": name, "model": os.getenv(f"{name.upper()}_MODEL") or DEFAULTS[name]}
-            for name in providers()]
+    rows = [{"id": name, "model": os.getenv(_model_env(name)) or DEFAULTS[name]} for name in DEFAULTS]
+    try:
+        from core.config import raw_config
+        local = raw_config().get("vlm", {}).get("hf_model", "llava-hf/llava-1.5-7b-hf")
+    except Exception:
+        local = "llava-hf/llava-1.5-7b-hf"
+    return rows + [{"id": "hf-local", "model": f"{local} (local)"}]
 
 
 def get_provider(name: str) -> VLMProvider | None:
@@ -125,7 +142,7 @@ def get_provider(name: str) -> VLMProvider | None:
     name = name.lower()
     if name not in DEFAULTS:
         return None
-    model = os.getenv(f"{name.upper()}_MODEL", DEFAULTS[name])
+    model = os.getenv(_model_env(name), DEFAULTS[name])
     key = os.getenv(KEYS[name])
     if name == "llama":
         base_url = os.getenv("LLAMA_BASE_URL")
@@ -136,14 +153,16 @@ def get_provider(name: str) -> VLMProvider | None:
         return None
     if name == "gemini":
         return GeminiProvider(model, key)
+    if name == "hf-router":
+        return OpenAICompatibleProvider(name, model, key, "https://router.huggingface.co/v1")
     base_url = "https://api.groq.com/openai/v1" if name == "groq" else None
-    return OpenAICompatibleProvider(name, model, key, base_url)
+    return OpenAICompatibleProvider(name, model, key, base_url, logprobs=name == "openai")
 
 
 def _missing_config(provider: str) -> dict[str, Any]:
     key_name = KEYS.get(provider.lower())
     if key_name:
-        model = os.getenv(f"{provider.upper()}_MODEL", DEFAULTS[provider.lower()])
+        model = os.getenv(_model_env(provider.lower()), DEFAULTS[provider.lower()])
         if provider.lower() == "llama" and not os.getenv("LLAMA_BASE_URL"):
             return {"response": "", "model": model, "provider": provider,
                     "error": "LLAMA_BASE_URL is not configured. Add your OpenAI-compatible Llama vision endpoint to .env."}
@@ -153,15 +172,15 @@ def _missing_config(provider: str) -> dict[str, Any]:
     return {"response": "", "model": "", "provider": provider, "error": f"Unknown provider: {provider}."}
 
 
-def run_vlm_task(image_path: str, prompt: str, provider: str) -> dict[str, Any]:
+def run_vlm_task(image_path: str, prompt: str, provider: str, temperature: float | None = None) -> dict[str, Any]:
     adapter = get_provider(provider)
-    return adapter.generate(image_path, prompt) if adapter else _missing_config(provider)
+    return adapter.generate(image_path, prompt, temperature) if adapter else _missing_config(provider)
 
 
-def generate_vlm_response(image_path: str, query: str, provider: str = "openai") -> dict[str, Any]:
+def generate_vlm_response(image_path: str, query: str, provider: str = "openai", temperature: float | None = None) -> dict[str, Any]:
     prompt = (
         "Answer the user's question concisely using only visible image content. "
         "Avoid unsupported details and speculation.\n\n"
         f"USER QUESTION:\n{query}"
     )
-    return run_vlm_task(image_path, prompt, provider)
+    return run_vlm_task(image_path, prompt, provider, temperature)

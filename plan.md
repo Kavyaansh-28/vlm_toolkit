@@ -8,6 +8,26 @@
 
 ---
 
+## ✅ Implementation status (branch `feat/full-paper-implementation`)
+
+All code tasks in this plan (S0, P1–P5, H1–H6, Y1–Y5, K1–K4) are implemented on the branch above. Y6 (LLM extractor) and Y7 (SugarCrepe) remain stretch goals. The code was not split per person; the task list below still works as a map of where things live and how to test them.
+
+**What remains is running it, not building it:**
+1. Review and merge the PR (Git rules in §5).
+2. Phase 0 accounts: Kaggle phone verification, HF org + dataset repo, `HF_TOKEN` secret.
+3. Kaggle smoke run (`BENCHES=["smoke"]`), then the full run (`["pope","chair"]`). See README "Benchmarks".
+4. `python -m evaluation.run_benchmarks` → `results/RESULTS.md`, then commit that file via a PR.
+5. Add demo photos to `test_images/` and rehearse `demo/DEMO.md`.
+
+**Verified locally:**
+- 62 tests pass.
+- Frontend typecheck and build pass.
+- Real Grounding DINO + CLIP ran on a COCO image on CPU, and hallucinated objects were deleted.
+- A real re-rank went through the dashboard API.
+- The `hf-local` engine produced a token-probability answer with LLaVA-OneVision-0.5B.
+
+---
+
 ## 0. Where we are, and how much of the paper this plan covers
 
 **Today:** about 45% of the paper is implemented. The pipeline (claims → Grounding DINO → CLIP crop → score → correct → SQLite) works with API VLMs. The Next.js dashboard works. Eq. 1, and Eq. 2 for colour, are correct.

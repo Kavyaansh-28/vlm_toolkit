@@ -8,8 +8,12 @@ result rather than a fabricated detection score.
 from __future__ import annotations
 
 import inspect
+import threading
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Protocol
+
+from verification.cache import VerificationCache, add_cost, image_sha256
 
 
 @dataclass
@@ -26,30 +30,55 @@ class Grounder(Protocol):
     def detect(self, image_path: str, object_name: str) -> GroundingResult: ...
 
 
+def _post_process(processor, outputs, input_ids, threshold: float, target_sizes):
+    # transformers renamed ``box_threshold`` to ``threshold``; pick the keyword from the
+    # signature rather than catching TypeError, which could mask unrelated errors.
+    post_process = processor.post_process_grounded_object_detection
+    parameters = inspect.signature(post_process).parameters
+    if "threshold" in parameters:
+        score_threshold = {"threshold": threshold}
+    elif "box_threshold" in parameters:
+        score_threshold = {"box_threshold": threshold}
+    else:
+        raise TypeError("Grounding DINO post-processor has no supported box-threshold parameter")
+    return post_process(outputs, input_ids, **score_threshold, text_threshold=threshold, target_sizes=target_sizes)[0]
+
+
 class GroundingDINO:
     """Lazy Hugging Face Grounding DINO adapter.
 
-    ``local_files_only`` defaults to false so a configured online workstation
-    can fetch official model weights once.  It is configurable to make
-    reproducible/offline evaluation fail explicitly instead of contacting a
-    registry unexpectedly.
+    ``threshold`` is the detection floor: boxes at or above it are returned so
+    s_obj stays a real score below the support threshold.  ``local_files_only``
+    makes reproducible/offline evaluation fail explicitly instead of contacting
+    a registry unexpectedly.
     """
-    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny", threshold: float = .30,
-                 local_files_only: bool = False):
+    def __init__(self, model_id: str = "IDEA-Research/grounding-dino-tiny", threshold: float = .10,
+                 local_files_only: bool = False, device: str = "auto"):
         self.model_id, self.threshold, self.local_files_only = model_id, threshold, local_files_only
+        self.device = device
         self._processor = self._model = None
         self._load_error: str | None = None
+        self._lock = threading.Lock()  # API requests run in a thread pool; load the model once
 
     def _load(self) -> bool:
-        if self._processor is not None:
+        if self._model is not None:
             return True
-        if self._load_error:
-            return False
+        with self._lock:
+            if self._model is not None:  # another thread finished loading while we waited
+                return True
+            if self._load_error:
+                return False
+            return self._load_locked()
+
+    def _load_locked(self) -> bool:
         try:
             from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
-            self._processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id, local_files_only=self.local_files_only)
-            self._model.eval()
+            from utils import get_device
+            self.device = get_device(self.device)
+            processor = AutoProcessor.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model = AutoModelForZeroShotObjectDetection.from_pretrained(self.model_id, local_files_only=self.local_files_only)
+            model.to(self.device).eval()
+            self._processor, self._model = processor, model  # publish only when fully ready
             return True
         except Exception as exc:  # dependency/model access boundary
             self._load_error = f"Grounding DINO unavailable: {type(exc).__name__}: {str(exc)[:180]}"
@@ -59,30 +88,47 @@ class GroundingDINO:
         if not self._load():
             return GroundingResult(object_name, available=False, reason=self._load_error or "Grounding DINO unavailable")
         try:
+            import torch
             from PIL import Image
             image = Image.open(image_path).convert("RGB")
             # Grounding DINO uses dot-separated noun phrases as its text prompt.
             prompt = object_name.strip().lower().rstrip(".") + "."
-            inputs = self._processor(images=image, text=prompt, return_tensors="pt")
-            import torch
+            inputs = self._processor(images=image, text=prompt, return_tensors="pt").to(self.device)
             with torch.inference_mode():
                 outputs = self._model(**inputs)
-            target_sizes = [image.size[::-1]]
-            post_process = self._processor.post_process_grounded_object_detection
-            parameters = inspect.signature(post_process).parameters
-            if "box_threshold" in parameters:
-                score_threshold = {"box_threshold": self.threshold}
-            elif "threshold" in parameters:
-                score_threshold = {"threshold": self.threshold}
-            else:
-                raise TypeError("Grounding DINO post-processor has no supported box-threshold parameter")
-            result = post_process(
-                outputs, inputs.input_ids, **score_threshold, text_threshold=self.threshold,
-                target_sizes=target_sizes,
-            )[0]
+            result = _post_process(self._processor, outputs, inputs.input_ids, self.threshold, [image.size[::-1]])
             boxes = [[round(float(x), 2) for x in box.tolist()] for box in result.get("boxes", [])]
             scores = [round(float(x), 5) for x in result.get("scores", [])]
             return GroundingResult(object_name, boxes, scores, backend=f"grounding-dino:{self.model_id}")
         except Exception as exc:
             return GroundingResult(object_name, available=False,
                                    reason=f"Grounding DINO inference failed: {type(exc).__name__}: {str(exc)[:180]}")
+
+
+class CachedGrounder:
+    """Wrap any grounder with the on-disk verification cache."""
+    def __init__(self, grounder: Grounder, cache: VerificationCache):
+        self.grounder, self.cache = grounder, cache
+
+    def detect(self, image_path: str, object_name: str) -> GroundingResult:
+        key = f"{image_sha256(image_path)}|{object_name.strip().lower()}"
+        row = self.cache.get(key)
+        if row is not None:
+            add_cost(row.get("ms", 0.0))
+            return GroundingResult(object_name, row["boxes"], row["scores"], backend=row.get("backend", "grounding-dino") + ":cached")
+        warm = getattr(self.grounder, "_model", True) is not None  # exclude first-call model loading
+        started = perf_counter()
+        result = self.grounder.detect(image_path, object_name)
+        ms = (perf_counter() - started) * 1000
+        if not warm and getattr(self.grounder, "_model", None) is not None:
+            ms = self._timed_rerun(image_path, object_name, ms)
+        add_cost(ms)
+        if result.available:  # never cache an outage as "no detection"
+            self.cache.put(key, {"boxes": result.boxes, "scores": result.scores, "backend": result.backend, "ms": round(ms, 1)})
+        return result
+
+    def _timed_rerun(self, image_path: str, object_name: str, fallback: float) -> float:
+        """The first call also loaded the model; time a second, warm inference instead."""
+        started = perf_counter()
+        rerun = self.grounder.detect(image_path, object_name)
+        return (perf_counter() - started) * 1000 if rerun.available else fallback

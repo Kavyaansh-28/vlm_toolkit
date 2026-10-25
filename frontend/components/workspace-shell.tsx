@@ -3,20 +3,20 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { motion } from "motion/react";
 import dynamic from "next/dynamic";
-import { Activity, ArrowRight, Check, ChevronDown, CircleHelp, Clock3, Database, Download, FileImage, ImagePlus, Layers3, LoaderCircle, ScanEye, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { Activity, ArrowRight, Check, ChevronDown, CircleHelp, ClipboardCheck, Clock3, Database, Download, FileImage, ImagePlus, Layers3, LoaderCircle, ScanEye, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { TransformComponent, TransformWrapper } from "react-zoom-pan-pinch";
 import { toast } from "sonner";
 import { SiteHeader } from "@/components/site-header";
 import { Button, EmptyState, Eyebrow, PageHeading, Panel, Pill } from "@/components/ui";
-import { analyzeImage, getConfig, getEvaluation, getHistory, getHistoryItem } from "@/lib/api";
+import { analyzeImage, getBenchmarks, getConfig, getHistory, getHistoryItem, getReview, postReview } from "@/lib/api";
 import { useWorkspace } from "@/lib/store";
-import type { Candidate, Evidence, HistorySummary } from "@/lib/types";
+import type { Candidate, Claim, Evidence, HistorySummary, ReviewItem } from "@/lib/types";
 import { ClaimGraph } from "@/components/claim-graph";
 
 const formSchema = z.object({
@@ -25,7 +25,6 @@ const formSchema = z.object({
   candidateCount: z.number().int().min(1).max(3),
   manualResponse: z.string().max(12000),
   verificationWeight: z.number().min(0).max(1), agreementWeight: z.number().min(0).max(1),
-  highThreshold: z.number().min(.5).max(1), lowThreshold: z.number().min(0).max(.5),
 });
 type AnalysisForm = z.infer<typeof formSchema>;
 const CandidateChart = dynamic(() => import("@/components/candidate-chart"), { ssr: false, loading: () => <div className="grid h-64 place-items-center text-[10px] text-zinc-600">Loading comparison chart…</div> });
@@ -35,9 +34,49 @@ const titles: Record<string, [string, string, string]> = {
   claims: ["02 / Claims", "A response, decomposed.", "Inspect typed claims and the graph structure extracted by the current backend."],
   evidence: ["03 / Evidence", "Trace the visual support.", "Review Grounding DINO regions, crop-level attribute evidence, contradictions, and uncertainty."],
   candidates: ["04 / Candidates", "Compare what the model said.", "Rank the actual candidates returned by this run; no synthetic comparison scores."],
-  evaluation: ["05 / Evaluation", "A research view for labelled data.", "Metrics only appear when labelled evaluation records exist."],
-  experiments: ["06 / Experiments", "Every run, traceable.", "Browse and reopen records saved by the existing SQLite experiment history."],
+  review: ["05 / Review", "Flagged claims, for people.", "Claims between the thresholds are escalated here for quick human annotation."],
+  evaluation: ["06 / Evaluation", "Benchmarks, as measured.", "POPE and CHAIR results appear only after a benchmark run has been processed."],
+  experiments: ["07 / Experiments", "Every run, traceable.", "Browse and reopen records saved by the existing SQLite experiment history."],
 };
+
+function actionTone(action?: string): "good" | "warn" | "bad" | "neutral" | "violet" {
+  if (action === "ACCEPT") return "good";
+  if (action === "CORRECT") return "violet";
+  if (action === "ABSTAIN") return "warn";
+  return "neutral";
+}
+
+function claimLabel(claim: Claim) {
+  if (claim.type === "attribute") return `${claim.subject} is ${claim.value}`;
+  if (claim.type === "quantity") return `${claim.value} × ${claim.subject}`;
+  if (claim.type === "relation") return `${claim.subject} ${String(claim.value ?? "").replace("_", " ")} ${claim.object ?? ""}`;
+  return `${claim.subject} exists`;
+}
+
+function detailLabel(detail?: string) {
+  if (!detail || detail === "flag") return detail === "flag" ? "flagged for review" : "";
+  if (detail === "delete") return "delete (no evidence)";
+  const [kind, rest] = detail.split(":");
+  if (kind === "replace") return `replace ${rest.replace("->", " → ")}`;
+  if (kind === "swap") return `swap ${rest.replace("<->", " ↔ ")}`;
+  if (kind === "recount") return `recount ${rest.replace("->", " → ")}`;
+  return detail;
+}
+
+type Segment = { kind: "same" | "del" | "add"; text: string };
+function wordDiff(before: string, after: string): Segment[] {
+  const a = before.split(/(\s+)/), b = after.split(/(\s+)/);
+  const table = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+  const out: Segment[] = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) { out.push({ kind: "same", text: a[i] }); i++; j++; }
+    else if (j < b.length && (i >= a.length || table[i][j + 1] >= table[i + 1][j])) { out.push({ kind: "add", text: b[j] }); j++; }
+    else { out.push({ kind: "del", text: a[i] }); i++; }
+  }
+  return out;
+}
 
 function statusTone(status?: string): "good" | "warn" | "bad" | "neutral" {
   if (status === "SUPPORTED" || status === "ACCEPT" || status === "RERANK") return "good";
@@ -49,21 +88,48 @@ function statusTone(status?: string): "good" | "warn" | "bad" | "neutral" {
 function percent(value?: number | null) { return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "—"; }
 
 function ReliabilityPanel({ candidate }: { candidate: Candidate }) {
+  const values = Object.values(candidate.claim_values ?? {});
   const metrics = [
-    ["Visual evidence", candidate.evidence.length ? candidate.evidence.reduce((sum, item) => sum + item.score, 0) / candidate.evidence.length : null],
-    ["Candidate agreement", candidate.agreement],
-    ["Model probability", candidate.probability_available ? candidate.probability ?? null : null],
+    ["Visual evidence · mean vᵢ", values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null, "no verifier output"],
+    ["Candidate agreement · Aⱼ", candidate.agreement_available ? candidate.agreement : null, "n/a (single candidate)"],
+    ["Token confidence · pⱼ", candidate.probability_available ? candidate.probability ?? null : null, "n/a (API model)"],
   ] as const;
-  return <Panel className="p-5"><div className="flex items-center justify-between"><Eyebrow>Toolkit reliability</Eyebrow><Activity size={14} className="text-violet-200/70"/></div><div className="mt-4 flex items-end gap-2"><span className="text-5xl font-semibold tracking-[-.07em] text-zinc-100">{percent(candidate.reliability)}</span><span className="mono mb-1 text-[9px] uppercase tracking-widest text-zinc-600">measured</span></div><div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[.06]"><motion.div initial={{ width: 0 }} animate={{ width: `${Math.max(0, Math.min(100, candidate.reliability * 100))}%` }} transition={{ duration: .8, ease: "easeOut" }} className="h-full rounded-full bg-gradient-to-r from-violet-400 to-cyan-200"/></div><div className="mt-5 space-y-3">{metrics.map(([label, value]) => <div key={label} className="flex items-center justify-between border-t border-white/[.05] pt-3"><span className="text-xs text-zinc-500">{label}</span><span className="mono text-xs text-zinc-300">{value === null ? "Unavailable" : percent(value)}</span></div>)}</div><p className="mt-4 text-[10px] leading-5 text-zinc-700">Provider token probabilities are unavailable here, so none are fabricated; their configured weight is redistributed to visual verification.</p></Panel>;
+  return <Panel className="p-5"><div className="flex items-center justify-between"><Eyebrow>Toolkit reliability</Eyebrow><Activity size={14} className="text-violet-200/70"/></div><div className="mt-4 flex items-end gap-2"><span className="text-5xl font-semibold tracking-[-.07em] text-zinc-100">{percent(candidate.reliability)}</span><span className="mono mb-1 text-[9px] uppercase tracking-widest text-zinc-600">measured</span></div><div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[.06]"><motion.div initial={{ width: 0 }} animate={{ width: `${Math.max(0, Math.min(100, candidate.reliability * 100))}%` }} transition={{ duration: .8, ease: "easeOut" }} className="h-full rounded-full bg-gradient-to-r from-violet-400 to-cyan-200"/></div><div className="mt-5 space-y-3">{metrics.map(([label, value, missing]) => <div key={label} className="flex items-center justify-between border-t border-white/[.05] pt-3"><span className="text-xs text-zinc-500">{label}</span><span className="mono text-xs text-zinc-300">{value === null ? missing : percent(value)}</span></div>)}</div><p className="mt-4 text-[10px] leading-5 text-zinc-700">Rⱼ = λ₁·mean(vᵢ) + λ₂·pⱼ + λ₃·Aⱼ. Unavailable terms are never fabricated; their weight is redistributed to the available ones.</p></Panel>;
 }
 
 function DecisionPanel({ candidate }: { candidate: Candidate }) {
   const Icon = candidate.decision === "ACCEPT" || candidate.decision === "RERANK" ? ShieldCheck : candidate.decision === "ABSTAIN" ? CircleHelp : ShieldAlert;
   const copy: Record<string, string> = {
-    ACCEPT: "Claims met the configured accept policy.", RERANK: "A stronger candidate was selected by the existing ranking policy.",
-    CORRECT: "Visual evidence supported an evidence-backed correction.", ABSTAIN: "Evidence did not justify a confident accept or correction.",
+    ACCEPT: "All claims met the accept threshold.", RERANK: "The top candidate was below the reliability threshold; a reliable alternative was selected.",
+    CORRECT: "Visual evidence supported evidence-backed corrections; verified content was left untouched.", ABSTAIN: "Some claims fall between thresholds or no candidate is reliable; flagged for human review.",
   };
-  return <div className="flex gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><span className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-white/[.035]"><Icon size={16} className={candidate.decision === "ACCEPT" || candidate.decision === "RERANK" ? "text-emerald-200" : candidate.decision === "ABSTAIN" ? "text-amber-100" : "text-rose-200"}/></span><div><div className="flex items-center gap-2"><Eyebrow>Decision</Eyebrow><Pill tone={statusTone(candidate.decision)}>{candidate.decision}</Pill></div><p className="mt-2 text-xs leading-5 text-zinc-500">{copy[candidate.decision] ?? "Decision returned by the existing verifier."}</p></div></div>;
+  return <div className="flex gap-3 rounded-2xl border border-white/[.08] bg-white/[.025] p-4"><span className="grid size-9 shrink-0 place-items-center rounded-xl border border-white/[.07] bg-white/[.035]"><Icon size={16} className={candidate.decision === "ACCEPT" || candidate.decision === "RERANK" ? "text-emerald-200" : candidate.decision === "ABSTAIN" ? "text-amber-100" : "text-rose-200"}/></span><div><div className="flex items-center gap-2"><Eyebrow>Decision</Eyebrow><Pill tone={statusTone(candidate.decision)}>{candidate.decision}</Pill></div><p className="mt-2 text-xs leading-5 text-zinc-500">{candidate.decision_reason || copy[candidate.decision] || "Decision returned by the policy."}</p></div></div>;
+}
+
+function CorrectionPanel({ candidate }: { candidate: Candidate }) {
+  const changed = candidate.corrected_text && candidate.corrected_text !== candidate.text;
+  return <Panel className="p-4 sm:p-5"><div className="mb-3 flex items-center justify-between"><Eyebrow>Correction</Eyebrow><Sparkles size={13} className="text-violet-200/50"/></div>
+    {changed ? <><p className="text-xs leading-7 text-zinc-400">{wordDiff(candidate.text, candidate.corrected_text).map((part, index) => part.kind === "same" ? <span key={index}>{part.text}</span> : part.kind === "del" ? <del key={index} className="rounded bg-rose-300/[.12] text-rose-200/80 decoration-rose-300/60">{part.text}</del> : <ins key={index} className="rounded bg-emerald-300/[.12] text-emerald-100 no-underline">{part.text}</ins>)}</p>
+      <div className="mt-3 border-t border-white/[.06] pt-3 text-xs leading-6 text-emerald-100/90">{candidate.corrected_text}</div></>
+      : <p className="text-xs leading-5 text-zinc-600">No evidence-backed correction was needed or possible. Uncertain claims are retained and flagged.</p>}
+  </Panel>;
+}
+
+function ActionTable({ candidate }: { candidate: Candidate }) {
+  const selectClaim = useWorkspace((state) => state.selectClaim);
+  const selectedClaimId = useWorkspace((state) => state.selectedClaimId);
+  const evidence = new Map(candidate.evidence.map((item) => [item.claim_id, item]));
+  if (!candidate.claims.length) return <p className="text-xs text-zinc-600">No claims were extracted.</p>;
+  return <div className="overflow-x-auto"><table className="w-full min-w-[560px] text-left text-[11px]">
+    <thead><tr className="border-b border-white/[.07] text-[9px] uppercase tracking-[.12em] text-zinc-600"><th className="py-2 pr-3 font-medium">Claim</th><th className="py-2 pr-3 font-medium">Verification result</th><th className="py-2 pr-3 font-medium">vᵢ</th><th className="py-2 font-medium">Action</th></tr></thead>
+    <tbody>{candidate.claims.map((claim) => { const item = evidence.get(claim.id); const action = candidate.claim_actions?.[claim.id]; const crop = item?.region_crop;
+      const active = selectedClaimId === claim.id;
+      return <tr key={claim.id} className={`border-b border-white/[.04] align-top ${active ? "bg-violet-200/[.045]" : "hover:bg-white/[.02]"}`}>
+        <td className="py-2.5 pr-3 text-zinc-200"><button type="button" onClick={() => selectClaim(active ? null : claim.id)} aria-pressed={active} aria-label={`Focus evidence for claim: ${claimLabel(claim)}`} className="rounded text-left hover:text-violet-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300">{claimLabel(claim)}<span className="mono block text-[9px] text-zinc-700">{claim.id}</span></button></td>
+        <td className="py-2.5 pr-3 text-zinc-500"><div className="flex gap-2">{crop && <img src={crop} alt={`Region crop for ${claim.subject}`} className="size-9 shrink-0 rounded object-cover"/>}<span>{item ? <><Pill tone={statusTone(item.status)}>{item.status}</Pill> <span className="ml-1">{item.explanation}</span></> : "not verified (ablation)"}</span></div></td>
+        <td className="mono py-2.5 pr-3 text-zinc-300">{candidate.claim_values?.[claim.id] != null ? candidate.claim_values![claim.id].toFixed(2) : "—"}</td>
+        <td className="py-2.5"><Pill tone={actionTone(action)}>{action ?? "—"}</Pill><div className="mt-1 text-[10px] text-zinc-500">{detailLabel(candidate.action_details?.[claim.id])}</div></td>
+      </tr>; })}</tbody></table></div>;
 }
 
 function ImageViewer({ candidate }: { candidate: Candidate }) {
@@ -96,7 +162,7 @@ function ClaimList({ candidate, compact = false }: { candidate: Candidate; compa
   const records = candidate.claims.map((claim) => ({ claim, evidence: candidate.evidence.find((item) => item.claim_id === claim.id) }));
   if (!records.length) return <EmptyState icon={<ScanEye size={18}/>} title="No claims extracted" detail="The response did not produce typed claims for inspection."/>;
   return <div className="space-y-2">{records.map(({ claim, evidence }) => <button key={claim.id} onClick={() => selectClaim(selectedClaimId === claim.id ? null : claim.id)} className={`w-full rounded-xl border p-3 text-left transition ${selectedClaimId === claim.id ? "border-violet-200/30 bg-violet-200/[.055]" : "border-white/[.06] bg-white/[.012] hover:border-white/[.12] hover:bg-white/[.025]"}`} aria-pressed={selectedClaimId === claim.id}>
-    <div className="flex items-start justify-between gap-2"><div><span className="mono mr-2 text-[9px] text-violet-200/80">{claim.id}</span><span className="text-xs font-medium text-zinc-200">{claim.subject}</span></div><Pill tone={statusTone(evidence?.status)}>{evidence?.status ?? "NO EVIDENCE"}</Pill></div>
+    <div className="flex items-start justify-between gap-2"><div><span className="mono mr-2 text-[9px] text-violet-200/80">{claim.id}</span><span className="text-xs font-medium text-zinc-200">{claim.subject}</span></div><div className="flex gap-1"><Pill tone={statusTone(evidence?.status)}>{evidence?.status ?? "NO EVIDENCE"}</Pill>{candidate.claim_actions?.[claim.id] && <Pill tone={actionTone(candidate.claim_actions[claim.id])}>{candidate.claim_actions[claim.id]}</Pill>}</div></div>
     <div className="mt-1.5 pl-[34px] text-[11px] text-zinc-500">{claim.attribute ? `${claim.attribute} · ` : ""}{claim.value ?? claim.type}{claim.object ? ` → ${claim.object}` : ""}</div>
     {!compact && evidence && selectedClaimId === claim.id && <div className="mt-3 border-t border-white/[.07] pt-3 text-[11px] leading-5 text-zinc-500"><div className="flex justify-between"><span>Claim score</span><span className="mono text-zinc-300">{percent(evidence.score)}</span></div>{evidence.verified_value != null && <div className="mt-1 flex justify-between"><span>Verified value</span><span className="text-zinc-300">{evidence.verified_value}</span></div>}<p className="mt-2">{evidence.explanation || "No explanation was returned."}</p><span className="mt-2 inline-block text-violet-200/80">Click to focus image and graph evidence →</span></div>}
   </button>)}</div>;
@@ -112,15 +178,16 @@ function AnalysisWorkspace() {
   const [drag, setDrag] = useState(false);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const { register, handleSubmit, watch, reset, formState: { errors } } = useForm<AnalysisForm>({
-    resolver: zodResolver(formSchema), defaultValues: { query: "Describe the objects and their colors.", provider: "", candidateCount: 3, manualResponse: "", verificationWeight: .75, agreementWeight: .25, highThreshold: .8, lowThreshold: .4 },
+    resolver: zodResolver(formSchema), defaultValues: { query: "Describe the objects and their colors.", provider: "", candidateCount: 3, manualResponse: "", verificationWeight: .6, agreementWeight: .2 },
   });
   useEffect(() => {
     if (!configQuery.data) return;
-    reset({ query: "Describe the objects and their colors.", provider: configQuery.data.provider, candidateCount: configQuery.data.defaults.candidate_count, manualResponse: "", verificationWeight: configQuery.data.defaults.verification_weight, agreementWeight: configQuery.data.defaults.agreement_weight, highThreshold: configQuery.data.defaults.high_threshold, lowThreshold: configQuery.data.defaults.low_threshold });
+    reset({ query: "Describe the objects and their colors.", provider: configQuery.data.provider, candidateCount: configQuery.data.defaults.candidate_count, manualResponse: "", verificationWeight: configQuery.data.defaults.verification_weight, agreementWeight: configQuery.data.defaults.agreement_weight });
   }, [configQuery.data, reset]);
+  const thresholds = configQuery.data?.defaults.thresholds ?? {};
   const mutation = useMutation({ mutationFn: async (values: AnalysisForm) => {
     if (!file) throw new Error("Choose an image to analyze.");
-    return analyzeImage({ file, query: values.query, provider: values.provider, candidateCount: values.candidateCount, manualResponse: values.manualResponse, verificationWeight: values.verificationWeight, agreementWeight: values.agreementWeight, highThreshold: values.highThreshold, lowThreshold: values.lowThreshold });
+    return analyzeImage({ file, query: values.query, provider: values.provider, candidateCount: values.candidateCount, manualResponse: values.manualResponse, verificationWeight: values.verificationWeight, agreementWeight: values.agreementWeight });
   }, onSuccess: (result) => { const url = zoomImage ?? URL.createObjectURL(file!); setAnalysis(result.analysis, url); setZoomImage(url); toast.success("Analysis complete", { description: `${result.analysis.candidates.length} real candidate(s) verified.` }); }, onError: (error) => toast.error("Verification failed", { description: error.message }) });
   const best = analysis?.candidates[activeCandidate] ?? analysis?.candidates[0];
   const chooseFile = (next?: File) => { if (!next) return; if (!next.type.startsWith("image/")) { toast.error("Choose a supported image file."); return; } if (next.size > 15 * 1024 * 1024) { toast.error("Image exceeds the 15 MB upload limit."); return; } if (zoomImage) URL.revokeObjectURL(zoomImage); useWorkspace.getState().clear(); setFile(next); const url = URL.createObjectURL(next); setZoomImage(url); };
@@ -140,7 +207,7 @@ function AnalysisWorkspace() {
         <Panel className="p-4 sm:p-5"><div className="mb-4 flex items-center justify-between"><Eyebrow>02 / Analysis controls</Eyebrow><SlidersHorizontal size={14} className="text-zinc-600"/></div>
           <label className="mb-1.5 block text-[10px] text-zinc-500" htmlFor="query">Question</label><textarea id="query" {...register("query")} rows={2} className="w-full resize-y rounded-xl border border-white/[.09] bg-black/20 px-3 py-2.5 text-xs leading-5 text-zinc-200 placeholder:text-zinc-700 focus:border-violet-200/30 focus:outline-none"/>{errors.query && <p className="mt-1 text-[10px] text-rose-300">{errors.query.message}</p>}
           <div className="mt-4 grid grid-cols-2 gap-3"><label className="text-[10px] text-zinc-500">Generator model<select {...register("provider")} className="mt-1.5 w-full rounded-lg border border-white/[.09] bg-[#111318] px-2.5 py-2 text-xs text-zinc-200" disabled={configQuery.isPending}>{(configQuery.data?.models ?? []).map((item) => <option key={item.id} value={item.id}>{item.model}</option>)}</select></label><label className="text-[10px] text-zinc-500">Candidates<select {...register("candidateCount", { valueAsNumber: true })} className="mt-1.5 w-full rounded-lg border border-white/[.09] bg-[#111318] px-2.5 py-2 text-xs text-zinc-200">{[1,2,3].map((n) => <option key={n} value={n}>{n}</option>)}</select></label></div><p className="mt-3 text-[9px] leading-4 text-zinc-600">Visual verifier: Grounding DINO object grounding + CLIP attribute checks on grounded crops. No verifier LLM is called.</p>
-          <details className="group mt-4 border-t border-white/[.06] pt-3"><summary className="flex cursor-pointer list-none items-center justify-between text-[10px] text-zinc-600">Reliability policy <ChevronDown size={13} className="transition group-open:rotate-180"/></summary><div className="mt-4 grid grid-cols-2 gap-x-3 gap-y-4">{([["verificationWeight","Visual weight"],["agreementWeight","Agreement"],["highThreshold","Accept at"],["lowThreshold","Correct below"]] as const).map(([key,label]) => <label key={key} className="text-[9px] text-zinc-600">{label}<span className="mono float-right text-zinc-400">{Number(watch(key)).toFixed(2)}</span><input type="range" min="0" max="1" step=".05" {...register(key,{valueAsNumber:true})} className="mt-2 w-full accent-violet-300"/></label>)}</div><p className="mt-3 text-[9px] leading-4 text-zinc-700">Model token probabilities are not available from this provider call; the existing scorer handles that policy.</p></details>
+          <details className="group mt-4 border-t border-white/[.06] pt-3"><summary className="flex cursor-pointer list-none items-center justify-between text-[10px] text-zinc-600">Reliability policy <ChevronDown size={13} className="transition group-open:rotate-180"/></summary><div className="mt-4 grid grid-cols-2 gap-x-3 gap-y-4">{([["verificationWeight","λ₁ visual"],["agreementWeight","λ₃ agreement"]] as const).map(([key,label]) => <label key={key} className="text-[9px] text-zinc-600">{label}<span className="mono float-right text-zinc-400">{Number(watch(key)).toFixed(2)}</span><input type="range" min="0" max="1" step=".05" {...register(key,{valueAsNumber:true})} className="mt-2 w-full accent-violet-300"/></label>)}</div><div className="mt-4 space-y-1 text-[9px] text-zinc-600">{Object.entries(thresholds).map(([kind, t]) => <div key={kind} className="flex justify-between"><span>{kind}: correct ≤ lo · accept ≥ hi</span><span className="mono text-zinc-400">{t.lo.toFixed(2)} / {t.hi.toFixed(2)}</span></div>)}</div><p className="mt-3 text-[9px] leading-4 text-zinc-700">Thresholds come from config/config.yaml{configQuery.data?.defaults.tuned ? " (tuned on the held-out POPE split)" : ""}. Token confidence pⱼ is only available for the local hf-local model.</p></details>
           <details className="mt-3 border-t border-white/[.06] pt-3"><summary className="cursor-pointer text-[10px] text-zinc-600">Controlled candidate override</summary><textarea {...register("manualResponse")} rows={3} placeholder="Optional. Separate multiple candidate texts with |||" className="mt-3 w-full rounded-lg border border-white/[.09] bg-black/20 px-3 py-2 text-[10px] leading-5 text-zinc-300 placeholder:text-zinc-700 focus:outline-none"/></details>
           <Button type="submit" className="mt-5 h-11 w-full" disabled={!file || mutation.isPending}>{mutation.isPending ? <><LoaderCircle size={15} className="animate-spin"/> Running verifier…</> : <>Run reliability analysis <ArrowRight size={14}/></>}</Button>
           {mutation.isPending && <p className="mt-3 flex items-center gap-2 text-[10px] text-zinc-600"><span className="size-1.5 animate-pulse rounded-full bg-violet-300"/>Waiting for the existing pipeline to complete. Backend stage-level progress is not exposed.</p>}
@@ -157,17 +224,18 @@ function AnalysisWorkspace() {
           {analysis!.candidates.length > 1 && <Panel className="p-4"><div className="mb-3 flex items-center justify-between"><Eyebrow>Candidate selection</Eyebrow><span className="mono text-[9px] text-zinc-600">{analysis!.candidates.length} TOTAL</span></div><select value={activeCandidate} onChange={(event) => setCandidate(Number(event.target.value))} className="w-full rounded-lg border border-white/[.09] bg-[#111318] px-3 py-2 text-xs text-zinc-200">{analysis!.candidates.map((candidate,index) => <option key={candidate.id} value={index}>{index + 1} · {candidate.id} · {candidate.decision} · {percent(candidate.reliability)}</option>)}</select></Panel>}
           <ReliabilityPanel candidate={best}/><DecisionPanel candidate={best}/>
           <Panel className="p-4 sm:p-5"><div className="flex items-center justify-between"><Eyebrow>Original model response</Eyebrow><Pill>{best.model}</Pill></div><p className="mt-4 text-sm leading-7 text-zinc-300">{best.original_response ?? best.text}</p><p className="mt-3 mono text-[9px] text-zinc-700">{analysis!.experiment_id ? `RUN ${String(analysis!.experiment_id).padStart(4, "0")} · ` : ""}Generator model: {best.model || "unavailable"} · visual verification: Grounding DINO + CLIP region probe{best.latency_ms != null ? ` · ${(best.latency_ms / 1000).toFixed(1)}s` : ""} · {best.id} · agreement {percent(best.agreement)}</p></Panel>
-          <Panel className="p-4 sm:p-5"><div className="mb-3 flex items-center justify-between"><Eyebrow>Correction</Eyebrow><Sparkles size={13} className="text-violet-200/50"/></div>{best.corrected_text && best.corrected_text !== best.text ? <><div className="text-xs leading-6 text-zinc-600">Original: <span className="text-zinc-400">{best.text}</span></div><div className="mt-3 border-t border-white/[.06] pt-3 text-xs leading-6 text-emerald-100/90">{best.corrected_text}</div><p className="mt-2 text-[10px] text-zinc-600">Only supported changes from the backend correction engine.</p></> : <p className="text-xs leading-5 text-zinc-600">No evidence-backed correction was returned. Uncertain claims are retained.</p>}</Panel>
+          <CorrectionPanel candidate={best}/>
         </> : <Panel className="p-5"><EmptyState icon={<ShieldCheck size={18}/>} title="Awaiting verification" detail="Reliability and decision panels will show values returned by the backend, never simulated scores."/></Panel>}
       </div>
     </form>
+    {best && <Panel className="mt-4 p-4 sm:p-5"><div className="mb-3 flex items-center justify-between"><div><Eyebrow>Claim verification and action</Eyebrow><p className="mt-1 text-[10px] text-zinc-600">Per-claim decision policy (paper Table IV): accept ≥ hi · correct ≤ lo with evidence · otherwise flag.</p></div><Pill tone="violet">{best.claims.length} claims</Pill></div><ActionTable candidate={best}/></Panel>}
     {best && <Panel className="mt-4 overflow-hidden p-4 sm:p-5"><div className="mb-3 flex items-center justify-between"><div><Eyebrow>Claim graph</Eyebrow><p className="mt-1 text-[10px] text-zinc-600">Select a node to focus the matching claim and its image evidence.</p></div><Pill tone="violet">backend graph data</Pill></div><ClaimGraph graph={best.graph} selectedCandidate={best}/></Panel>}
   </>;
 }
 
 function ClaimsPage() {
   const analysis = useWorkspace((state) => state.analysis); const index = useWorkspace((state) => state.activeCandidate); const candidate = analysis?.candidates[index] ?? analysis?.candidates[0];
-  return <><PageHeading eyebrow="Claim graph / typed extraction" title="A response, decomposed." detail="Select a claim to highlight it in the graph and inspect its corresponding evidence."/>{candidate ? <div className="grid gap-4 xl:grid-cols-[.75fr_1.25fr]"><Panel className="p-4 sm:p-5"><Eyebrow>Extracted claims</Eyebrow><div className="mt-4"><ClaimList candidate={candidate}/></div></Panel><Panel className="p-4 sm:p-5"><Eyebrow>Claim graph</Eyebrow><div className="mt-3"><ClaimGraph graph={candidate.graph} selectedCandidate={candidate}/></div></Panel></div> : <EmptyState icon={<Activity size={18}/>} title="No analysis to inspect" detail="Run an image analysis first. Claim IDs, graph edges, and statuses come from real backend output." action={<Link href="/analyze"><Button>Go to Analyze <ArrowRight size={14}/></Button></Link>}/>}</>;
+  return <><PageHeading eyebrow="Claim graph / typed extraction" title="A response, decomposed." detail="Select a claim to highlight it in the graph and inspect its corresponding evidence."/>{candidate ? <><Panel className="mb-4 p-4 sm:p-5"><Eyebrow>Verification and action per claim</Eyebrow><div className="mt-3"><ActionTable candidate={candidate}/></div></Panel><div className="grid gap-4 xl:grid-cols-[.75fr_1.25fr]"><Panel className="p-4 sm:p-5"><Eyebrow>Extracted claims</Eyebrow><div className="mt-4"><ClaimList candidate={candidate}/></div></Panel><Panel className="p-4 sm:p-5"><Eyebrow>Claim graph</Eyebrow><div className="mt-3"><ClaimGraph graph={candidate.graph} selectedCandidate={candidate}/></div></Panel></div></> : <EmptyState icon={<Activity size={18}/>} title="No analysis to inspect" detail="Run an image analysis first. Claim IDs, graph edges, and statuses come from real backend output." action={<Link href="/analyze"><Button>Go to Analyze <ArrowRight size={14}/></Button></Link>}/>}</>;
 }
 
 function EvidencePage() {
@@ -192,13 +260,57 @@ function EvidencePage() {
 function CandidatesPage() {
   const analysis = useWorkspace((state) => state.analysis); const setCandidate = useWorkspace((state) => state.setCandidate);
   const candidates = analysis?.candidates ?? [];
-  const chart = candidates.map((item, index) => ({ name: `Candidate ${String(index + 1).padStart(2,"0")}`, reliability: Math.round(item.reliability * 100), agreement: Math.round(item.agreement * 100) }));
-  return <><PageHeading eyebrow="Candidate comparison / actual run" title="Compare what the model said." detail="Candidates are ordered and scored by the existing verifier. Every chart point corresponds to a real returned candidate."/>{candidates.length ? <><Panel className="p-5"><Eyebrow>Measured comparison · percent</Eyebrow><CandidateChart data={chart}/></Panel><div className="mt-4 grid gap-3 lg:grid-cols-2">{candidates.map((candidate,index) => <button key={candidate.id} onClick={() => setCandidate(index)} className={`surface rounded-2xl p-5 text-left transition ${index === 0 ? "border-violet-200/20" : "hover:border-white/15"}`}><div className="flex items-start justify-between"><div><Eyebrow>Candidate {String(index+1).padStart(2,"0")}</Eyebrow><h3 className="mt-2 text-2xl font-medium tracking-[-.05em]">{percent(candidate.reliability)}</h3></div><Pill tone={statusTone(candidate.decision)}>{candidate.decision}</Pill></div><p className="mt-3 line-clamp-3 text-xs leading-6 text-zinc-400">{candidate.text}</p><div className="mt-4 flex flex-wrap gap-2"><Pill>{candidate.claims.length} claims</Pill><Pill>{candidate.evidence.length} evidence records</Pill><Pill>agreement {percent(candidate.agreement)}</Pill></div><div className="mt-4 border-t border-white/[.06] pt-3 text-[10px] text-zinc-600">{candidate.diagnosis.length ? candidate.diagnosis.join(" · ") : "No diagnosis returned"}</div></button>)}</div></> : <EmptyState icon={<Layers3 size={18}/>} title="No candidates to compare" detail="Run an analysis with multiple candidates or provide candidate overrides separated by |||." action={<Link href="/analyze"><Button>Run analysis</Button></Link>}/>}</>;
+  const chart = candidates.map((item) => ({ name: `${item.id}${item.selected ? " ✓" : ""}`, reliability: Math.round(item.reliability * 100), agreement: item.agreement_available ? Math.round(item.agreement * 100) : 0 }));
+  return <><PageHeading eyebrow="Candidate comparison / actual run" title="Compare what the model said." detail="Candidates are ordered and scored by the existing verifier. Every chart point corresponds to a real returned candidate."/>{candidates.length ? <><Panel className="p-5"><Eyebrow>Measured comparison · percent</Eyebrow><CandidateChart data={chart}/></Panel><div className="mt-4 grid gap-3 lg:grid-cols-2">{candidates.map((candidate,index) => <button key={candidate.id} onClick={() => setCandidate(index)} className={`surface rounded-2xl p-5 text-left transition ${candidate.selected ? "border-violet-200/25" : "hover:border-white/15"}`}><div className="flex items-start justify-between"><div><Eyebrow>{candidate.id}{candidate.generation_strategy ? ` · ${candidate.generation_strategy}` : ""}</Eyebrow><h3 className="mt-2 text-2xl font-medium tracking-[-.05em]">R {percent(candidate.reliability)}</h3></div><div className="flex flex-col items-end gap-1">{candidate.selected && <Pill tone="violet">selected</Pill>}<Pill tone={statusTone(candidate.decision)}>{candidate.decision}</Pill></div></div><p className="mt-3 line-clamp-3 text-xs leading-6 text-zinc-400">{candidate.text}</p>{candidate.selected && candidate.decision_reason && <p className="mt-2 text-[10px] leading-5 text-violet-200/70">{candidate.decision_reason}</p>}<div className="mt-4 flex flex-wrap gap-2"><Pill>{candidate.claims.length} claims</Pill><Pill>agreement {candidate.agreement_available ? percent(candidate.agreement) : "n/a"}</Pill><Pill>pⱼ {candidate.probability_available ? percent(candidate.probability) : "n/a (API model)"}</Pill></div><div className="mt-4 border-t border-white/[.06] pt-3 text-[10px] text-zinc-600">{candidate.diagnosis.length ? candidate.diagnosis.join(" · ") : "No diagnosis returned"}</div></button>)}</div></> : <EmptyState icon={<Layers3 size={18}/>} title="No candidates to compare" detail="Run an analysis with multiple candidates or provide candidate overrides separated by |||." action={<Link href="/analyze"><Button>Run analysis</Button></Link>}/>}</>;
+}
+
+const pct = (value?: number | null) => (typeof value === "number" ? (value * 100).toFixed(1) : "—");
+const CHAIR_ORDER = ["base_vlm", "full_toolkit", "n_equals_1", "no_reliability_scoring", "no_attribute_binding"];
+
+function MetricTable({ head, rows }: { head: string[]; rows: (string | number)[][] }) {
+  return <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-[11px]"><thead><tr className="border-b border-white/[.07] text-[9px] uppercase tracking-[.12em] text-zinc-600">{head.map((h) => <th key={h} className="py-2 pr-3 font-medium">{h}</th>)}</tr></thead>
+    <tbody>{rows.map((row, index) => <tr key={index} className="border-b border-white/[.04]">{row.map((cell, j) => <td key={j} className={`py-2 pr-3 ${j < 2 ? "text-zinc-300" : "mono text-zinc-400"}`}>{cell}</td>)}</tr>)}</tbody></table></div>;
 }
 
 function EvaluationPage() {
-  const query = useQuery({ queryKey: ["evaluation"], queryFn: getEvaluation });
-  return <><PageHeading eyebrow="Evaluation / labelled results only" title="Measure what the evidence can support." detail="A research view for benchmark and labelled experiment data. No synthetic metrics or baseline scores are shown."/>{query.data?.available ? <Panel className="p-6"><Eyebrow>Labelled evaluation available</Eyebrow><pre className="mt-4 overflow-auto text-xs text-zinc-400">{JSON.stringify(query.data,null,2)}</pre></Panel> : <EmptyState icon={<Database size={18}/>} title="No labelled evaluation set connected" detail={query.data?.message ?? "Precision, recall, F1, Brier score, calibration, and correction success will appear when labelled evaluation records are supplied. The existing evaluator currently has no records."}/>}{query.isError && <p role="alert" className="mt-3 text-xs text-rose-300">Could not reach the evaluation service: {(query.error as Error).message}</p>}</>;
+  const query = useQuery({ queryKey: ["benchmarks"], queryFn: getBenchmarks });
+  const results = query.data?.results;
+  const pope = results?.pope ?? {}; const chair = results?.chair ?? {};
+  const popeRows = ["base_vlm", "full_toolkit", ...Object.keys(pope).filter((k) => k !== "base_vlm" && k !== "full_toolkit")].flatMap((name) =>
+    Object.entries(pope[name] ?? {}).filter(([, m]) => m.status === "EVALUATED").map(([split, m]) => [name, split, m.sample_count, pct(m.accuracy), pct(m.precision), pct(m.recall), pct(m.f1), pct(m.yes_ratio), pct(m.abstention_rate)]));
+  const chairRows = [...CHAIR_ORDER.filter((k) => chair[k]), ...Object.keys(chair).filter((k) => !CHAIR_ORDER.includes(k))].map((name) => {
+    const m = chair[name]; const lat = results?.latency?.[name];
+    return [name, m.sample_count, pct(m.CHAIR_S), pct(m.CHAIR_I), pct(m.object_recall), m.avg_length.toFixed(1), lat?.ratio != null ? `${lat.ratio}×` : "—"];
+  });
+  const meta = results?.meta;
+  return <><PageHeading eyebrow="Evaluation / measured benchmark runs" title="Benchmarks, as measured." detail="POPE (object existence) and CHAIR (caption hallucination) from processed benchmark rows. No targets or synthetic scores are shown."/>
+    {query.isError && <p role="alert" className="mb-3 text-xs text-rose-300">Could not reach the benchmark service: {(query.error as Error).message}</p>}
+    {!results || (!popeRows.length && !chairRows.length) ? <EmptyState icon={<Database size={18}/>} title="No benchmark run processed yet" detail={query.data?.message ?? "Run the Kaggle notebook, download results, then python -m evaluation.run_benchmarks."}/> : <div className="space-y-4">
+      {meta && <Panel className="p-4"><div className="flex flex-wrap gap-2"><Pill tone="violet">{meta.model ?? "model ?"}</Pill><Pill>{meta.precision ?? "precision ?"}</Pill><Pill>{meta.hardware ?? "hardware ?"}</Pill><Pill tone={meta.tuned ? "good" : "warn"}>{meta.tuned ? "thresholds tuned on held-out split" : "default thresholds"}</Pill>{query.data?.timestamp && <Pill>{query.data.timestamp.slice(0, 16).replace("T", " ")} UTC</Pill>}</div></Panel>}
+      {popeRows.length > 0 && <Panel className="p-5"><Eyebrow>POPE · object existence</Eyebrow><div className="mt-3"><MetricTable head={["Variant", "Split", "N", "Acc", "Prec", "Rec", "F1", "Yes %", "Abstain %"]} rows={popeRows}/></div></Panel>}
+      {chairRows.length > 0 && <Panel className="p-5"><Eyebrow>CHAIR · caption hallucination (lower is better) and object recall</Eyebrow><div className="mt-3"><MetricTable head={["Variant", "N", "CHAIR_S", "CHAIR_I", "Recall", "Avg words", "Latency"]} rows={chairRows}/></div></Panel>}
+      <p className="text-[10px] leading-5 text-zinc-600">POPE and CHAIR measure object hallucination only; attribute-binding correction is shown qualitatively in the Analyze view. POPE uses 450 images per split because 50 are held out for threshold tuning.</p>
+    </div>}</>;
+}
+
+function ReviewPage() {
+  const client = useQueryClient();
+  const query = useQuery({ queryKey: ["review"], queryFn: getReview });
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const mutation = useMutation({ mutationFn: postReview, onSuccess: () => { client.invalidateQueries({ queryKey: ["review"] }); toast.success("Label saved"); }, onError: (error) => toast.error("Could not save label", { description: (error as Error).message }) });
+  const items = query.data ?? [];
+  const pending = items.filter((item) => !item.label).length;
+  const label = (item: ReviewItem, value: "correct" | "incorrect" | "unsure") => mutation.mutate({ experiment_id: item.experiment_id, claim_id: item.claim_id, label: value, note: notes[`${item.experiment_id}:${item.claim_id}`] ?? item.note ?? "" });
+  return <><PageHeading eyebrow="Human review / flagged claims" title="Flagged claims, for people." detail="Claims with lo < v < hi, or without usable evidence, are escalated here. Labels are stored with the run for provenance and future calibration." right={<Pill tone={pending ? "warn" : "good"}>{pending} awaiting review</Pill>}/>
+    {query.isPending ? <Panel className="animate-pulse p-7"><div className="h-4 w-48 rounded bg-white/[.05]"/></Panel> : query.isError ? <EmptyState icon={<ClipboardCheck size={18}/>} title="Review service unavailable" detail={(query.error as Error).message}/> : !items.length ? <EmptyState icon={<ClipboardCheck size={18}/>} title="Nothing to review" detail="Flagged claims from analyses appear here."/> :
+    <div className="grid gap-3 lg:grid-cols-2">{items.map((item) => { const key = `${item.experiment_id}:${item.claim_id}`;
+      return <Panel key={key} className="p-4"><div className="flex gap-3">{item.region_crop ? <img src={item.region_crop} alt={`Region for ${item.claim_text}`} className="size-16 shrink-0 rounded-lg object-cover"/> : <div className="grid size-16 shrink-0 place-items-center rounded-lg border border-dashed border-white/10 text-[9px] text-zinc-700">no crop</div>}
+        <div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-2"><div><div className="text-sm font-medium text-zinc-100">{item.claim_text}</div><div className="mono mt-0.5 text-[9px] text-zinc-600">RUN {String(item.experiment_id).padStart(4, "0")} · {item.claim_id} · v={item.v != null ? item.v.toFixed(2) : "n/a"}</div></div>{item.label ? <Pill tone={item.label === "correct" ? "good" : item.label === "incorrect" ? "bad" : "warn"}>{item.label}</Pill> : <Pill tone="warn">{item.status ?? "flagged"}</Pill>}</div>
+          {item.sentence && <p className="mt-2 text-[11px] italic leading-5 text-zinc-500">“{item.sentence}”</p>}
+          <p className="mt-1 text-[11px] leading-5 text-zinc-500">{item.explanation}</p>
+          <input value={notes[key] ?? item.note ?? ""} onChange={(event) => setNotes({ ...notes, [key]: event.target.value })} placeholder="Optional note" className="mt-3 w-full rounded-lg border border-white/[.09] bg-black/20 px-2.5 py-1.5 text-[11px] text-zinc-300 placeholder:text-zinc-700 focus:outline-none"/>
+          <div className="mt-2 flex gap-2"><Button type="button" variant="secondary" className="px-3 py-1.5 text-xs" onClick={() => label(item, "correct")} disabled={mutation.isPending}><Check size={13}/> Claim is true</Button><Button type="button" variant="secondary" className="px-3 py-1.5 text-xs" onClick={() => label(item, "incorrect")} disabled={mutation.isPending}><X size={13}/> Claim is false</Button><Button type="button" variant="ghost" className="px-3 py-1.5 text-xs" onClick={() => label(item, "unsure")} disabled={mutation.isPending}><CircleHelp size={13}/> Unsure</Button></div>
+        </div></div></Panel>; })}</div>}</>;
 }
 
 function ExperimentsPage() {
@@ -211,7 +323,7 @@ function ExperimentsPage() {
 
 export function WorkspaceShell({ section }: { section: string }) {
   const [eyebrow,title,detail] = titles[section];
-  const pages: Record<string, () => React.ReactNode> = { analyze: AnalysisWorkspace, claims: ClaimsPage, evidence: EvidencePage, candidates: CandidatesPage, evaluation: EvaluationPage, experiments: ExperimentsPage };
+  const pages: Record<string, () => React.ReactNode> = { analyze: AnalysisWorkspace, claims: ClaimsPage, evidence: EvidencePage, candidates: CandidatesPage, review: ReviewPage, evaluation: EvaluationPage, experiments: ExperimentsPage };
   const Page = pages[section];
   return <main className="min-h-screen bg-[#0b0c0f]"><SiteHeader/><div className="mx-auto max-w-[1480px] px-4 pb-20 pt-28 sm:px-7 lg:px-10"><div className="mb-6 flex gap-1 overflow-x-auto border-b border-white/[.06] pb-3 hide-scrollbar">{Object.entries(titles).map(([key,[label]]) => <Link key={key} href={`/${key}`} className={`whitespace-nowrap rounded-lg px-3 py-2 text-[10px] transition ${section === key ? "bg-white/[.07] text-zinc-100" : "text-zinc-600 hover:text-zinc-300"}`}>{label.split(" / ")[1]}</Link>)}</div><Page/></div><footer className="border-t border-white/[.05] px-4 py-5 text-center"><span className="mono text-[8px] uppercase tracking-[.15em] text-zinc-800">Local-first · evidence-linked · uncertainty-aware</span></footer></main>;
 }
