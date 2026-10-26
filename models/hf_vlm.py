@@ -13,6 +13,8 @@ from functools import lru_cache
 import torch
 from PIL import Image
 
+CPU_MAX_IMAGE_SIDE = 384  # one 384 px tile for OneVision: ~3x faster on CPU than 768 px
+
 
 def _model_class(model_id: str):
     import transformers
@@ -74,6 +76,10 @@ class HFVLMEngine:
     def generate_candidates(self, image_path: str, query: str, n: int, temperature: float = .7,
                             max_new_tokens: int = 128, seed: int = 42) -> list[dict]:
         image = Image.open(image_path).convert("RGB")
+        # Tiling VLMs (OneVision, LLaVA-Next) turn large photos into thousands of image tokens,
+        # which makes CPU generation take minutes. GPU runs (benchmarks) keep the original image.
+        if self.device == "cpu":
+            image.thumbnail((CPU_MAX_IMAGE_SIDE, CPU_MAX_IMAGE_SIDE))
         torch.manual_seed(seed)
         results = []
         for strategy, k in (("greedy", 1), ("sampled", n - 1)):

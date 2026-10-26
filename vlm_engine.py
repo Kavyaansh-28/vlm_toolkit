@@ -6,6 +6,7 @@ lists, so their candidates are repeated calls and are labelled as such.
 """
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
@@ -47,5 +48,6 @@ def get_engine(provider: str) -> VLMEngine:
         from core.config import raw_config
         from models.hf_vlm import load_engine
         options = raw_config().get("vlm", {})
-        return load_engine(str(options.get("hf_model", "llava-hf/llava-1.5-7b-hf")), str(options.get("hf_precision", "fp16")))
+        model = os.getenv("HF_LOCAL_MODEL") or str(options.get("hf_model", "llava-hf/llava-1.5-7b-hf"))
+        return load_engine(model, str(options.get("hf_precision", "fp16")))
     return ProviderVLMEngine(provider)
