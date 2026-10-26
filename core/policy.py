@@ -57,7 +57,7 @@ def select(candidates: list[Candidate], cfg: PipelineConfig) -> tuple[int, str, 
         if "CORRECT" in actions:
             decision, reason = "CORRECT", "Evidence-backed corrections applied; verified content left untouched."
         elif "ABSTAIN" in actions:
-            decision, reason = "ABSTAIN", "Some claims fall between thresholds or lack evidence; flagged for review."
+            decision, reason = "ABSTAIN", "Some claims fall between thresholds or lack evidence; flagged as uncertain and left unchanged."
         else:
             decision, reason = "ACCEPT", "All claims meet the accept threshold."
     return chosen, decision, reason
