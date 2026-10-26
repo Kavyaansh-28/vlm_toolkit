@@ -4,6 +4,8 @@ A training-free, model-agnostic, inference-time reliability layer for Vision-Lan
 
 The toolkit generates n candidate responses and decomposes each into atomic claims. It verifies existence claims with Grounding DINO and attribute bindings with CLIP on the object's own crop. It then scores every candidate (Eq. 3) and applies the per-claim **accept / correct / re-rank / abstain** policy. Verified content is never modified.
 
+Architecture, diagrams and the reliability formula in detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## Status
 
 | Paper component | Where | Status |
