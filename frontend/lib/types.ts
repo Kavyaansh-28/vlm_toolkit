@@ -57,9 +57,3 @@ export type BenchmarkReport = {
     meta?: { model?: string; precision?: string; hardware?: string; tuned?: boolean; thresholds?: Record<string, number[]> };
   };
 };
-
-export type ReviewItem = {
-  experiment_id: number; created_at: string; query: string; candidate_id: string; claim_id: string;
-  claim: Claim; claim_text: string; sentence: string; v?: number | null; status?: string | null;
-  explanation: string; region_crop?: string | null; label?: string | null; note?: string;
-};

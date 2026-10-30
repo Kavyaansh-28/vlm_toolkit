@@ -178,7 +178,7 @@ def provider_models() -> list[dict[str, str]]:
     rows = [{"id": name, "model": os.getenv(_model_env(name)) or DEFAULTS[name]} for name in DEFAULTS]
     try:
         from core.config import raw_config
-        local = raw_config().get("vlm", {}).get("hf_model", "llava-hf/llava-1.5-7b-hf")
+        local = os.getenv("HF_LOCAL_MODEL") or raw_config().get("vlm", {}).get("hf_model", "llava-hf/llava-1.5-7b-hf")
     except Exception:
         local = "llava-hf/llava-1.5-7b-hf"
     return rows + [{"id": "hf-local", "model": f"{local} (local)"}]

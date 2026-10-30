@@ -21,7 +21,6 @@ const nextConfig: NextConfig = {
       { source: "/api/config", destination: `${api}/api/config` },
       { source: "/api/evaluation", destination: `${api}/api/evaluation` },
       { source: "/api/benchmarks", destination: `${api}/api/benchmarks` },
-      { source: "/api/review", destination: `${api}/api/review` },
       { source: "/api/history", destination: `${api}/api/history` },
       { source: "/api/history/:id", destination: `${api}/api/history/:id` },
       { source: "/health", destination: `${api}/health` },

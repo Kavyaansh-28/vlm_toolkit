@@ -1,4 +1,4 @@
-import type { AnalysisPayload, AppConfig, BenchmarkReport, Evaluation, HistoryItem, HistorySummary, ReviewItem } from "@/lib/types";
+import type { AnalysisPayload, AppConfig, BenchmarkReport, Evaluation, HistoryItem, HistorySummary } from "@/lib/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, headers: { ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers }, cache: "no-store" });
@@ -12,9 +12,6 @@ export const getEvaluation = () => request<Evaluation>("/api/evaluation");
 export const getBenchmarks = () => request<BenchmarkReport>("/api/benchmarks");
 export const getHistory = () => request<HistorySummary[]>("/api/history");
 export const getHistoryItem = (id: number) => request<HistoryItem>(`/api/history/${id}`);
-export const getReview = () => request<ReviewItem[]>("/api/review");
-export const postReview = (body: { experiment_id: number; claim_id: string; label: "correct" | "incorrect" | "unsure"; note?: string }) =>
-  request<{ status: string }>("/api/review", { method: "POST", body: JSON.stringify(body) });
 
 export async function analyzeImage(input: {
   file: File; query: string; candidateCount: number; provider: string;
